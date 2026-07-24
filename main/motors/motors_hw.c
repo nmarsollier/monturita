@@ -1,52 +1,32 @@
 /* Motors - motors_hw.c
  *
- * Purpose: TMC2209 STEP/DIR GPIO control.
+ * Purpose: DIR and ENABLE GPIO control for TMC2209 stepper drivers.
+ *
+ * STEP pulse generation is handled by the RMT peripheral (motors_rmt.c)
+ * for jitter-free hardware-timed pulses with DMA streaming.
  *
  * Hardware: NEMA 17 stepper motors driven by TMC2209 in STEP/DIR mode
  * with UART-configured microstepping and hardware interpolation.
  * Gear reduction: MOTOR_PULLEY_TEETH:AXIS_PULLEY_TEETH (see motors_internal.h).
- *
- * STEP pulse width is set above the TMC2209 minimum (~100 ns) with
- * margin for GPIO slew rate, keeping duty cycle low at max slew speed.
  */
 
-#include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
-#include "esp_rom_sys.h"
-#include "motors.h"
 #include "motors_internal.h"
 #include "tmc/tmc.h"
-
-#define MOTORS_ENABLE_GPIO GPIO_NUM_27
-
-static const char *TAG = "MOTORS_HW";
-#define RA_STEP_GPIO GPIO_NUM_26
-#define DEC_STEP_GPIO GPIO_NUM_25
-#define RA_DIR_GPIO  GPIO_NUM_33
-#define DEC_DIR_GPIO  GPIO_NUM_32
-
-/*
- * STEP pulse width — set above TMC2209 minimum to absorb GPIO overhead.
- * HIGH_US + LOW_US = total pulse; must remain a small fraction of the
- * shortest step period at max slew speed.
- */
-#define STEP_PULSE_HIGH_US 2
-#define STEP_PULSE_LOW_US  2
-
-/* TMC2209 EN pin is usually active-low. */
-#define MOTORS_ENABLE_ACTIVE_LEVEL 0
-#define MOTORS_ENABLE_INACTIVE_LEVEL 1
 
 /* Cached last directions to avoid redundant GPIO writes. */
 static int last_dir_ra = -1;
 static int last_dir_dec = -1;
 
 esp_err_t motors_hw_init(void) {
+    /*
+     * Only DIR and ENABLE pins are managed via GPIO.
+     * STEP pins (GPIO 10, GPIO 15) are owned by the RMT peripheral and
+     * configured by motors_rmt_init().
+     */
     const uint64_t pin_mask =
-            (1ULL << RA_STEP_GPIO) |
             (1ULL << RA_DIR_GPIO) |
-            (1ULL << DEC_STEP_GPIO) |
             (1ULL << DEC_DIR_GPIO) |
             (1ULL << MOTORS_ENABLE_GPIO);
 
@@ -63,10 +43,6 @@ esp_err_t motors_hw_init(void) {
     if (result != ESP_OK) {
         return result;
     }
-
-    gpio_set_level(RA_STEP_GPIO, 0);
-    gpio_set_level(DEC_STEP_GPIO, 0);
-    esp_rom_delay_us(20);
 
     last_dir_ra = 0;
     last_dir_dec = 0;
@@ -103,23 +79,4 @@ void motors_hw_set_direction_dec(MotorDirection direction) {
         last_dir_dec = dir;
         gpio_set_level(DEC_DIR_GPIO, dir);
     }
-}
-
-/*
- * Generate a STEP pulse on the RA axis.
- * Pulse width = STEP_PULSE_HIGH_US + STEP_PULSE_LOW_US.
- * Duty cycle stays low at max slew speed; well within TMC2209 spec.
- */
-void motors_hw_step_ra() {
-    gpio_set_level(RA_STEP_GPIO, 1);
-    esp_rom_delay_us(STEP_PULSE_HIGH_US);
-    gpio_set_level(RA_STEP_GPIO, 0);
-    esp_rom_delay_us(STEP_PULSE_LOW_US);
-}
-
-void motors_hw_step_dec() {
-    gpio_set_level(DEC_STEP_GPIO, 1);
-    esp_rom_delay_us(STEP_PULSE_HIGH_US);
-    gpio_set_level(DEC_STEP_GPIO, 0);
-    esp_rom_delay_us(STEP_PULSE_LOW_US);
 }

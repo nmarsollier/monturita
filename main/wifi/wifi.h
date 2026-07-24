@@ -4,14 +4,14 @@
 
 #include "esp_err.h"
 
-void network_start(void);
+void wifi_start(void);
 
-void network_sntp_start(void);
+void wifi_sntp_start(void);
 
 extern bool wifi_started;
 extern int  wifi_retry_count;
 
-#define WIFI_SETUP_AP_SSID "Monturita"
+#define WIFI_SETUP_AP_SSID "monturita"
 #define WIFI_SETUP_AP_PASSWORD ""
 #define WIFI_SETUP_AP_CHANNEL 1
 #define WIFI_SETUP_AP_MAX_CONNECTIONS 4
@@ -22,6 +22,6 @@ extern int  wifi_retry_count;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAILED_BIT BIT1
 
-bool network_is_setup_ap_started(void);
+bool wifi_is_setup_ap_started(void);
 
-esp_err_t network_configure_home_wifi(const char *ssid, const char *password);
+esp_err_t wifi_configure_home_wifi(const char *ssid, const char *password);

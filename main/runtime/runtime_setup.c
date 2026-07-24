@@ -11,8 +11,9 @@
 #include "led.h"
 #include "motors.h"
 #include "mount.h"
-#include "network.h"
+#include "wifi.h"
 #include "tmc.h"
+#include "usb_net.h"
 
 static const char *TAG = "RUNTIME_SETUP";
 
@@ -32,7 +33,7 @@ void setup_init(void) {
     }
     ESP_ERROR_CHECK(nvs_result);
 
-    network_start();
+    wifi_start();
 
     led_init();
 
@@ -40,13 +41,28 @@ void setup_init(void) {
      * WiFi error: setup AP running means home wifi didn't connect.
      * Recoverable — a later successful connection calls led_clear_error().
      */
-    if (network_is_setup_ap_started()) {
+    if (wifi_is_setup_ap_started()) {
         led_set_state(LED_STATE_ERROR);
+    }
+
+    /*
+     * USB Ethernet (ECM/RNDIS) — non-fatal, mount works without USB.
+     * Blocking call with 10 s timeout for host enumeration.
+     */
+    esp_err_t usb_result = usb_net_init();
+    if (usb_result != ESP_OK) {
+        ESP_LOGW(TAG, "USB net init skipped: %s", esp_err_to_name(usb_result));
     }
 
     mount_init();
 
-    motors_init();
+    esp_err_t motors_err = motors_init();
+    if (motors_err != ESP_OK) {
+        ESP_LOGE(TAG, "motors_init failed: %s — mount disabled",
+                 esp_err_to_name(motors_err));
+        led_set_state(LED_STATE_ERROR);
+        /* Continue boot — REST/network still functional for diagnostics. */
+    }
 
     /*
      * UART / TMC error: permanent in practice because no code path

@@ -8,7 +8,7 @@
 #define LED_MODE        LEDC_LOW_SPEED_MODE
 #define LED_TIMER       LEDC_TIMER_0
 #define LED_CHANNEL     LEDC_CHANNEL_0
-#define LED_GPIO        23
+#define LED_GPIO        4
 #define LED_FREQ_HZ     5000
 #define LED_DUTY_RES    LEDC_TIMER_13_BIT
 #define LED_DUTY_MAX    8191

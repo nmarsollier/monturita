@@ -6,7 +6,7 @@
 #include "mount.h"
 
 #include "utils/utils.h"
-#include "network/network.h"
+#include "wifi/wifi.h"
 
 /*
  * Business use case: expose the mount's current status via the API.
@@ -54,10 +54,10 @@ esp_err_t rest_status_handler(httpd_req_t *request) {
             "\"is_home\":%s"
             "}";
 
-    const char *status = status_to_string(data.status);
-    const char *tracking = tracking_to_string(data.tracking);
+    const char *status = motors_status_to_string(data.status);
+    const char *tracking = motors_tracking_to_string(data.tracking);
     char dec_sign = data.dec.sign >= 0 ? '+' : '-';
-    bool wifi_ap = network_is_setup_ap_started();
+    bool wifi_ap = wifi_is_setup_ap_started();
 
     /*
      * Fixed-size buffer — the JSON response with LST + pier_side fits in 640 bytes.

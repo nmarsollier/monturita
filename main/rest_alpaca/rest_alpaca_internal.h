@@ -10,9 +10,9 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 /* ─── Alpaca server identity ─── */
-#define ALPACA_SERVER_NAME        "Monturita"
-#define ALPACA_SERVER_DESCRIPTION "Monturita \xe2\x80\x94 Ecuatorial Mount Controller"
-#define ALPACA_DRIVER_INFO        "Monturita Alpaca Driver v1.0"
+#define ALPACA_SERVER_NAME        "monturita"
+#define ALPACA_SERVER_DESCRIPTION "monturita \xe2\x80\x94 Ecuatorial Mount Controller"
+#define ALPACA_DRIVER_INFO        "monturita Alpaca Driver v1.0"
 #define ALPACA_DRIVER_VERSION     "1.0.0"
 #define ALPACA_INTERFACE_VERSION  3
 
@@ -21,7 +21,7 @@
 #define ALPACA_MAX_URI_HANDLERS   64
 
 /* ─── Telescope device ─── */
-#define ALPACA_DEVICE_NAME        "Monturita"
+#define ALPACA_DEVICE_NAME        "monturita"
 #define ALPACA_DEVICE_TYPE        "Telescope"
 #define ALPACA_DEVICE_NUMBER      0
 #define ALPACA_UNIQUE_ID          "monturita-telescope-001"

@@ -5,8 +5,8 @@ Mantener este archivo en formato simple, para que pueda leerse y editarse rapida
 ## Definicion del proyecto
 
 - Logica para manejar montura ecuatorial DIY simple
-- Utiliza un modulo ESP32 NodeMcu ESP32 WiFi Bluetooth 4.2 con USB-C y 38 Pines (ver seccion "Placa ESP32" abajo para
-  especificaciones completas y pinout)
+- Utiliza un modulo Hosyond ESP32-S3 Development Board N16R8 con ESP32-S3-WROOM-1, WiFi y Bluetooth Dual-Mode,
+  USB-C (ver seccion "Placa ESP32-S3" abajo para especificaciones completas y pinout)
 - Utiliza 2 TMC2209 de BT https://global.bttwiki.com/TMC2209.html
 - Utiliza 2 motores paso a paso Nema17 con las siguientes caracteristicas: Low Noise:15N.cm(21oz.in) holding torque,
   drive voltage 12V/ 24V, rated current 1.4A, resistance 3.5ohms
@@ -14,127 +14,130 @@ Mantener este archivo en formato simple, para que pueda leerse y editarse rapida
 - La montura posee 2 botones fisicos, Stop y Home
 - Posee una pantalla minimalista OLED de 0.98 inch, se muestra verticalmente
 
-## Placa ESP32
+## Placa ESP32-S3
 
 ### Identificacion
 
-- **Modelo**: NodeMcu ESP32 WiFi Bluetooth 4.2 con USB-C y 38 Pines
-- **SoC**: ESP32 (Tensilica Xtensa 32-bit LX6, doble nucleo)
-- **Chip USB-Serial**: CP2102
-- **Factor de forma**: NodeMcu estandar
-- **Dimensiones**: 51 x 25 mm
-- **Antena**: Integrada en PCB
+- **Modelo**: Hosyond 3Pack ESP32-S3 Development Board N16R8
+- **SoC**: ESP32-S3-WROOM-1 (Xtensa 32-bit LX7, doble nucleo)
+- **Chip USB-Serial**: Integrado en el SoC (USB Serial/JTAG nativo)
+- **Factor de forma**: Compatible con protoboard estandar
+- **Flash**: 16 MB (N16)
+- **PSRAM**: 8 MB (R8, octal)
+- **Antena**: Integrada en el modulo WROOM-1
 
 ### Especificaciones tecnicas
 
-- **CPU**: Tensilica Xtensa 32-bit LX6, doble nucleo, hasta 240 MHz
-- **Desempeno**: Hasta 600 DMIPS
-- **WiFi**: 802.11 b/g/n/e/i (WFA, WPA/WPA2, WAPI)
-- **Bluetooth**: v4.2 BR/EDR + BLE (Bluetooth Low Energy)
-- **Alimentacion**: 5V via USB-C
-- **Logica I/O**: 3.3V (tolerancia de pines: solo 3.3V, no tolera 5V)
-- **GPIO digitales**: 24 (algunos pines solo como entrada)
-- **ADC**: Conversor analogico-digital integrado (12-bit SAR ADC, 18 canales)
-- **DAC**: 2 canales DAC de 8 bits
-- **UART**: 2 controladores UART
+- **CPU**: Tensilica Xtensa 32-bit LX7, doble nucleo, hasta 240 MHz
+- **WiFi**: 802.11 b/g/n (2.4 GHz)
+- **Bluetooth**: v5.0 BLE + Bluetooth Mesh
+- **Alimentacion**: 5V via USB-C (regulador 3.3V onboard)
+- **Logica I/O**: 3.3V (no tolera 5V)
+- **GPIO digitales**: 45 (configurables)
+- **ADC**: 2 conversores SAR ADC de 12 bits, hasta 20 canales
+- **UART**: 3 controladores UART
 - **I2C**: 2 controladores I2C
-- **SPI**: 2 controladores SPI (alta velocidad)
+- **SPI**: 4 controladores SPI
 - **I2S**: 2 controladores I2S
-- **PWM LED**: 16 canales PWM independientes
-- **Sensores capacitivos touch**: 10 pines
-- **Sensor de efecto Hall**: Integrado
+- **PWM**: 8 canales LEDC independientes
+- **Sensores capacitivos touch**: 14 pines
+- **USB**: USB OTG 1.1 (nativo, sin chip externo)
 
 ### Memorias
 
-- **ROM**: 448 KB
-- **SRAM**: 520 KB
-- **SRAM en RTC**: 16 KB
-- **Flash SPI externa**: 4 MB (QSPI)
+- **ROM**: 384 KB
+- **SRAM**: 512 KB
+- **Flash SPI externa**: 16 MB (Quad SPI, modulo WROOM-1)
+- **PSRAM**: 8 MB (octal SPI, modulo WROOM-1)
 
 ### Seguridad hardware
 
-- Estandares IEEE 802.11: WFA, WPA/WPA2, WAPI
-- OTP de 1024 bits
-- Aceleracion criptografica por hardware: AES, HASH (SHA-2), RSA, ECC, RNG
+- Estandares IEEE 802.11: WFA, WPA/WPA2, WPA3
+- Arranque seguro (Secure Boot v2)
+- Aceleracion criptografica por hardware: AES-128/256, SHA, RSA, ECC, HMAC
+- Flash Encryption (XTS-AES-128)
+- Firma digital para firmware
 
-### Layout completo de la placa con conexiones
+### Layout de la placa con conexiones
 
 ```
-LADO IZQUIERDO               LADO DERECHO
-(USB-C abajo)                (USB-C abajo)
+LADO IZQUIERDO                LADO DERECHO
+(USB-C abajo)                 (USB-C abajo)
 
-3V3  ← TMC VIO (3.3V)        GND  ← TMC GND
-EN   (reset, no conectar)    G23  (libre)
-SP   (GPIO36, solo in)       G22  (libre, I2C SCL)
-SN   (GPIO39, solo in)       TXD  (GPIO1, UART0 TX, no tocar)
-G34  ← Hall sensor (futuro)  RXD  (GPIO3, UART0 RX, no tocar)
-G35  ← Hall sensor (futuro)  G21  (libre, I2C SDA)
-G32  ← DEC DIR               GND  ← GND botones
-G33  ← RA DIR                G19  ← HOME button
-G25  ← DEC STEP              G18  ← STOP button
-G26  ← RA STEP               G5   (strapping, no tocar)
-G27  ← ENABLE                G17  ← TMC TX (UART2)
-G14  (libre)                 G16  ← TMC RX (UART2)
-G12  (strapping, no tocar)   G4   (strapping, no tocar)
-GND  ← 12V GND (fuente ext)  G0   (BOOT, no tocar)
-G13  (libre)                 G2   (LED onboard)
-SD2  (flash, no tocar)       G15  (strapping, no tocar)
-SD3  (flash, no tocar)       SD1  (flash, no tocar)
-CMD  (flash, no tocar)       SD0  (flash, no tocar)
-V5   (5V USB, no usar)       CLK  (flash, no tocar)
+3V3  ← TMC VIO (3.3V)         GND  ← TMC GND
+EN   (reset)                  G46  (strapping, no tocar)
+G1   (ADC, libre)             G0   (BOOT, no tocar)
+G2   (ADC, libre)             G35  (libre)
+G3   (ADC, strapping)         G36  (libre)
+G4   ← LED externo            G37  (libre)
+G5   (libre)                  G38  (libre)
+G6   (libre)                  G39  (libre)
+G7   ← DEC DIR                G40  (libre)
+G8   (libre)                  G41  (libre)
+G9   ← RA DIR                 G42  (libre)
+G10  ← RA STEP                G43  (U0TXD, consola debug, no tocar)
+G11  (libre)                  G44  (U0RXD, consola debug, no tocar)
+G12  (libre)                  G45  (strapping, no tocar)
+G13  (libre)                  G47  (libre)
+G14  ← ENABLE                 G48  (libre)
+G15  ← DEC STEP               GND  ← 12V GND (fuente ext)
+G16  ← STOP button            G17  ← TMC TX (UART, con 1k en serie)
+G18  ← TMC RX (UART)          V5   (5V USB, no usar)
+G21  ← HOME button
 ```
 
 ### Pinout definitivo de Montura
 
-| Label placa | GPIO | Funcion           | Modulo        | Notas                          |
-|-------------|------|-------------------|---------------|--------------------------------|
-| 3V3         | —    | TMC VIO / MS1/MS2 | tmc           | Alimentacion logica 3.3V       |
-| GND (der)   | —    | TMC GND            | tmc           | Tierra comun                   |
-| GND (izq)   | —    | 12V GND externo   | motors        | Tierra de fuente de motores    |
-| G16         | 16   | TMC UART RX       | tmc           | UART2, single-wire bus         |
-| G17         | 17   | TMC UART TX       | tmc           | UART2, single-wire bus         |
-| G18         | 18   | STOP button       | —             | Input con pull-up interno      |
-| G19         | 19   | HOME button       | —             | Input con pull-up interno      |
-| G25         | 25   | DEC STEP          | motors_motion | Pulso STEP eje declinacion     |
-| G26         | 26   | RA STEP           | motors_motion | Pulso STEP eje ascension recta |
-| G27         | 27   | MOTORS ENABLE     | motors_motion | Enable global de ambos motores |
-| G32         | 32   | DEC DIR           | motors_motion | Direccion eje declinacion      |
-| G33         | 33   | RA DIR            | motors_motion | Direccion eje ascension recta  |
+| Label placa | GPIO | Funcion           | Modulo        | Notas                                 |
+|-------------|------|-------------------|---------------|---------------------------------------|
+| 3V3         | —    | TMC VIO / MS1/MS2 | tmc           | Alimentacion logica 3.3V              |
+| GND         | —    | TMC GND           | tmc           | Tierra comun                          |
+| GND         | —    | 12V GND externo   | motors        | Tierra de fuente de motores           |
+| G4          | 4    | LED externo       | led           | LEDC PWM, indicador de estado         |
+| G7          | 7    | DEC DIR           | motors_motion | Direccion eje declinacion             |
+| G9          | 9    | RA DIR            | motors_motion | Direccion eje ascension recta         |
+| G10         | 10   | RA STEP           | motors_motion | Pulso STEP eje ascension recta        |
+| G14         | 14   | MOTORS ENABLE     | motors_motion | Enable global compartido RA y DEC     |
+| G15         | 15   | DEC STEP          | motors_motion | Pulso STEP eje declinacion            |
+| G16         | 16   | STOP button       | —             | Input con pull-up interno             |
+| G17         | 17   | TMC UART TX       | tmc           | UART, con resistencia 1k en serie     |
+| G18         | 18   | TMC UART RX       | tmc           | UART, single-wire bus                 |
+| G21         | 21   | HOME button       | —             | Input con pull-up interno             |
 
 **Uso futuro:**
-| G21 | 21 | I2C SDA | — | Sensor / display |
-| G22 | 22 | I2C SCL | — | Sensor / display |
-| G34 | 34 | Hall limit | — | Solo input, requiere pull-up ext |
-| G35 | 35 | Hall limit | — | Solo input, requiere pull-up ext |
+| GPIO | Funcion     | Notas                              |
+|------|-------------|------------------------------------|
+| 5    | I2C SDA     | Sensor / display                   |
+| 6    | I2C SCL     | Sensor / display                   |
+| 1    | Hall limit  | Sensor de fin de carrera           |
+| 2    | Hall limit  | Sensor de fin de carrera           |
 
 ### Pines con restricciones (NO USAR)
 
-| Label | GPIO | Restriccion                     |
-|-------|------|---------------------------------|
-| G0    | 0    | Boot: LOW en reset = modo flash |
-| TXD   | 1    | UART0 TX, consola debug         |
-| G2    | 2    | Strapping + LED onboard         |
-| RXD   | 3    | UART0 RX, consola debug         |
-| G4    | 4    | Strapping                       |
-| G5    | 5    | Strapping (HIGH al boot)        |
-| CLK   | 6    | Flash SPI interno               |
-| SD0   | 7    | Flash SPI interno               |
-| SD1   | 8    | Flash SPI interno               |
-| SD2   | 9    | Flash SPI interno               |
-| SD3   | 10   | Flash SPI interno               |
-| CMD   | 11   | Flash SPI interno               |
-| G12   | 12   | Strapping MTDI (voltaje flash)  |
-| G15   | 15   | Strapping (LOW al boot)         |
+| GPIO | Restriccion                                 |
+|------|---------------------------------------------|
+| 0    | Boot: LOW en reset = modo flash (ROM boot)  |
+| 3    | Strapping JTAG (LOW al boot)                |
+| 43   | UART0 TX, consola debug (USB-Serial nativo) |
+| 44   | UART0 RX, consola debug (USB-Serial nativo) |
+| 45   | Strapping (VDD_SPI voltage)                 |
+| 46   | Strapping (LOW al boot = log normal)        |
 
 ### Notas de desarrollo para esta placa
 
-- El chip CP2102 requiere drivers en macOS/Windows. En macOS los drivers son nativos desde Sierra.
-- La placa usa USB-C para alimentacion y programacion. No requiere cable USB-A a micro-USB.
-- Para flashear: mantener G0 a GND durante reset, o usar `idf.py flash` que lo hace automaticamente via DTR/RTS.
-- El LED onboard esta en G2, activo HIGH. Puede usarse como indicador de estado.
-- La antena en PCB ofrece buen rendimiento, pero si la montura tiene partes metalicas cercanas, considerar orientacion.
-- El regulador de voltaje onboard convierte 5V de USB a 3.3V para el ESP32 y perifericos. La corriente maxima disponible
-  en el pin 3V3 depende del regulador (tipicamente ~500-800 mA).
+- El ESP32-S3 tiene USB-Serial/JTAG nativo integrado en el SoC. No requiere chip externo CP2102.
+  En macOS los drivers son nativos. Para flashear y monitorear se usa el mismo puerto USB-C.
+- La placa usa USB-C para alimentacion y programacion.
+- Para flashear: `idf.py flash` usa el USB-Serial/JTAG nativo automaticamente. No es necesario
+  manipular pines BOOT.
+- El LED externo esta en GPIO 4, controlado via LEDC PWM. La placa tambien tiene un LED onboard
+  (generalmente en GPIO 48 o similar, no usado en este proyecto).
+- La antena en PCB del modulo WROOM-1 ofrece buen rendimiento, pero si la montura tiene partes
+  metalicas cercanas, considerar orientacion.
+- El regulador de voltaje onboard convierte 5V de USB a 3.3V para el ESP32-S3 y perifericos.
+  La corriente maxima disponible en el pin 3V3 depende del regulador (tipicamente ~500-800 mA).
+- El ESP32-S3 soporta PSRAM octal de 8 MB. Se puede habilitar en menuconfig para buffers grandes.
+- La N16R8 tiene 16 MB de flash, suficiente para OTA y multiples particiones de firmware.
 
 ## Arquitectura
 
@@ -151,8 +154,11 @@ Cliente Web (Alpine.js) → REST API → Mount (orquestacion) → Motors → TMC
 - **Motors** (`main/motors/`) — Control de motores de alto nivel.
 - **Motors Motion** (`main/motors_motion/`) — Ejecucion hardware: generacion de pulsos STEP/DIR.
 - **TMC** (`main/tmc/`) — Driver TMC2209 via UART. Unica fuente de verdad para configuracion de microsteps.
-- **LED** (`main/led/`) — Control PWM del LED externo en GPIO 23. Estados: tenue (normal), brillante (slewing), respiracion (error).
+- **LED** (`main/led/`) — Control PWM del LED externo en GPIO 4. Estados: tenue (normal), brillante (slewing), respiracion (error).
 - **Network** (`main/network/`) — Conectividad WiFi.
+- **USB Net** (`main/usb_net/`) — Interfaz de red USB Ethernet via TinyUSB en modo ECM/RNDIS. Permite conectar
+  la montura a una computadora por USB-C y acceder a la API REST y Alpaca sin WiFi. IP estatica del ESP32-S3:
+  192.168.7.1, DHCP server para el host.
 - **Tools** (`main/tools/`) — Utilidades transversales (parser, validacion).
 
 ## Reglas generales
@@ -191,11 +197,6 @@ Cliente Web (Alpine.js) → REST API → Mount (orquestacion) → Motors → TMC
 
 ## Relaciones entre modulos (dependencias)
 
-- REST API puede llamar a Mount y Network
-- Mount puede llamar a Motors
-- Motors puede llamar a Motors Motion
-- Motors Motion puede llamar a TMC
-- TMC no depende de ningun otro modulo del proyecto (solo del framework ESP-IDF)
-- LED puede llamar a Motors (lectura de estado) y TMC (consulta de inicializacion)
-- Screen es autocontenido y puede llamar a Mount
-- Tools es transversal: no depende de modulos de dominio ni es dependido por ellos
+- Network es autocontenido y expone WiFi STA + AP fallback
+- USB Net depende de TinyUSB (componente gestionado `espressif/esp_tinyusb`) y esp_netif
+- REST API y Alpaca se enlazan a INADDR_ANY, accesibles tanto por WiFi como por USB Net

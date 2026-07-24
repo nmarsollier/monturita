@@ -1,13 +1,13 @@
-# Monturita — No Precision Instruments Inc.
+# monturita — No Precision Instruments Inc.
 
-Fully functional mini equatorial mount toy powered by an ESP32, controllable via N.I.N.A. (Alpaca / ASCOM)
+Fully functional mini equatorial mount toy powered by an ESP32-S3, controllable via N.I.N.A. (Alpaca / ASCOM)
 and its own REST API.
 
-This firmware runs on an ESP32 NodeMCU board, driving two NEMA 17 stepper motors through
+This firmware runs on a Hosyond ESP32-S3 N16R8 board, driving two NEMA 17 stepper motors through
 TMC2209 drivers. It exposes a full ASCOM Alpaca telescope interface on port 11111 so
 N.I.N.A. and other clients can discover and control the mount directly.
 
-<img src="docs/monturita.jpeg" alt="Monturita" width="400">
+<img src="docs/montura-eq.jpeg" alt="monturita" width="400">
 
 ## Architecture
 
@@ -20,30 +20,59 @@ REST API  (port 80)  ── serves embedded SPA at /
   TMC2209 UART driver  (hardware config & microstep control)
 
 Network  (WiFi station + setup AP fallback)
-LED  (GPIO 23 PWM: dim / bright / breathing)
+USB Net  (RNDIS/ECM gadget, 192.168.7.1, DHCP server)
+LED  (GPIO 4 PWM: dim / bright / breathing)
 Runtime  (init sequence + periodic loop)
 ```
 
 ## Hardware
 
-- **Board**: ESP32 NodeMcu (USB-C, CP2102, 38 pins)
+- **Board**: Hosyond ESP32-S3 N16R8 (ESP32-S3-WROOM-1, USB-C, 16 MB Flash, 8 MB PSRAM)
 - **Motor drivers**: 2× TMC2209 (UART, StealthChop, 128 µsteps)
 - **Motors**: 2× NEMA 17 (1.8° step, 1.4 A rated)
 - **Reduction**: 20-tooth motor pulley → 80-tooth axis pulley (4:1)
-- **LED**: PWM indicator (GPIO 23) — three states: dim (~10%) at idle, bright (100%) during slewing, slow breathing on error (WiFi / UART). On-board LED (GPIO 2) unused.
+- **Power**: Power supply input of 12v 5A and MINI DC 360 to convert 12v dc to 5v dc.
+- **1k resistor**: for UART communication.
+- **LED**: PWM indicator (GPIO 4) — three states: dim (~10%) at idle, bright (100%) during slewing, slow breathing on error (WiFi / UART). On-board LED unused.
 
 ### Pin mapping
 
-| GPIO | Function        |
-|------|-----------------|
-| 16   | TMC2209 UART RX |
-| 17   | TMC2209 UART TX |
-| 23   | LED (PWM)       |
-| 25   | DEC STEP        |
-| 26   | RA STEP         |
-| 27   | MOTORS ENABLE   |
-| 32   | DEC DIR         |
-| 33   | RA DIR          |
+<img src="docs/circuit.jpeg" alt="monturita" width="400">
+
+<img src="docs/board.jpeg" alt="monturita" width="400">
+
+| GPIO | Function           | Notes                        |
+|------|--------------------|------------------------------|
+| 4    | LED (PWM)          | External status indicator    |
+| 7    | DEC DIR            | Declination axis direction   |
+| 9    | RA DIR             | Right ascension axis dir     |
+| 10   | RA STEP            | Right ascension step pulse   |
+| 14   | MOTORS ENABLE      | Shared enable for both axes  |
+| 15   | DEC STEP           | Declination step pulse       |
+| 16   | STOP button        | Input, internal pull-up      |
+| 17   | TMC2209 UART TX    | Via 1k series resistor       |
+| 18   | TMC2209 UART RX    | Single-wire bus              |
+
+## USB Ethernet (RNDIS/ECM)2
+
+The ESP32-S3 acts as a USB Ethernet gadget via its native USB-OTG peripheral. Connect the mount to a laptop with a USB-C cable and it appears as a network adapter — no WiFi needed in the field.
+
+| Property        | Value                    |
+|-----------------|--------------------------|
+| Protocol        | ECM (Linux/macOS) / RNDIS (Windows) |
+| ESP32-S3 IP     | `192.168.7.1` (static)   |
+| Host IP         | `192.168.7.2` – `192.168.7.10` (DHCP) |
+| REST API        | `http://192.168.7.1/api/status` |
+| Alpaca API      | `http://192.168.7.1:11111` |
+| UDP Discovery   | `192.168.7.1:32227`      |
+
+WiFi and USB Ethernet work simultaneously — all servers bind to `INADDR_ANY`.
+
+### OS-specific notes
+
+- **Windows 10/11**: RNDIS driver is built-in. The device appears as "Mount USB Ethernet" in Network adapters.
+- **macOS**: CDC-ECM is natively supported. The interface appears as `usb0`.
+- **Linux**: CDC-ECM is handled by the `cdc_ether` kernel module (loaded automatically).
 
 ## Setup
 
@@ -65,7 +94,7 @@ Runtime  (init sequence + periodic loop)
 mkdir -p ~/.espressif
 git clone --depth 1 --branch v6.0.1 https://github.com/espressif/esp-idf.git ~/.espressif/v6.0.1/esp-idf
 export IDF_TOOLS_PATH="$HOME/.espressif/tools"
-cd ~/.espressif/v6.0.1/esp-idf && bash install.sh esp32
+cd ~/.espressif/v6.0.1/esp-idf && bash install.sh esp32s3
 
 # build tools + Node.js
 brew install cmake ninja node
@@ -85,7 +114,7 @@ alias idf.py="$PYTHON $IDF_PATH/tools/idf.py"
 ### Build
 
 ```sh
-idf.py set-target esp32
+idf.py set-target esp32s3
 idf.py build flash monitor
 ```
 

@@ -1,9 +1,9 @@
 /* LED — led_init.c
  *
- * Purpose: initialise LEDC PWM on GPIO 23 for brightness control.
+ * Purpose: initialise LEDC PWM on GPIO 4 for brightness control.
  *
  * Configures timer 0 at 5 kHz, 13-bit resolution (8192 steps),
- * binds channel 0 to GPIO 23, and starts with the dim (NORMAL) duty.
+ * binds channel 0 to GPIO 4, and starts with the dim (NORMAL) duty.
  */
 #include "led_internal.h"
 

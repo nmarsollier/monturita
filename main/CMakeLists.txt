@@ -7,6 +7,9 @@ idf_component_register(
         "led/led_update.c"
         "led/led_breathe_cb.c"
 
+        "usb_net/usb_net_init.c"
+        "usb_net/usb_net_data.c"
+
         "motors/motors_current_state.c"
         "motors/motors_disable.c"
         "motors/motors_enable.c"
@@ -23,8 +26,11 @@ idf_component_register(
         "motors/motors_tools.c"
 
         "motors/motors_hw.c"
+        "motors/motors_rmt.c"
         "motors/motors_command_queue.c"
         "motors/motors_motion_task.c"
+        "motors/motors_pulse_guide.c"
+        "motors/motors_is_pulse_guiding.c"
 
         "mount/mount.c"
         "mount/mount_coordinate_tools.c"
@@ -43,11 +49,12 @@ idf_component_register(
         "mount/mount_set_tracking.c"
         "mount/mount_unpark.c"
         "mount/mount_get_visible_status_data.c"
+        "mount/mount_pulse_guide.c"
 
-        "network/network.c"
-        "network/network_configure_home_wifi.c"
-        "network/network_is_setup_ap_started.c"
-        "network/network_sntp.c"
+        "wifi/wifi.c"
+        "wifi/wifi_configure_home_wifi.c"
+        "wifi/wifi_is_setup_ap_started.c"
+        "wifi/wifi_sntp.c"
 
         "rest/rest_server_start.c"
         "rest/rest_slew_to_coordinates_handler.c"
@@ -87,6 +94,7 @@ idf_component_register(
         "alpaca_bridge/alpaca_bridge_target.c"
         "alpaca_bridge/alpaca_bridge_tracking_rate.c"
         "alpaca_bridge/alpaca_bridge_utc_date.c"
+        "alpaca_bridge/alpaca_bridge_guide_rate.c"
         "rest_alpaca/rest_alpaca_canfindhome_handler.c"
         "rest_alpaca/rest_alpaca_canmoveaxis_handler.c"
         "rest_alpaca/rest_alpaca_canpark_handler.c"
@@ -194,8 +202,9 @@ idf_component_register(
         "runtime"
         "utils"
         "udp_alpaca"
-        "network"
+        "wifi"
         "tmc"
+        "usb_net"
 
         EMBED_TXTFILES
         "../www/dist/index.html"
@@ -210,4 +219,5 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_ledc
         esp_driver_uart
+        esp_driver_rmt
 )

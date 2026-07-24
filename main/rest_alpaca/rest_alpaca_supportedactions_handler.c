@@ -3,7 +3,7 @@
 
 /* Alpaca — Device — SupportedActions
  *
- * Purpose: Returns the list of custom action names (empty for Monturita).
+ * Purpose: Returns the list of custom action names (empty for monturita).
  *
  * Alpaca usage: Called by clients that support vendor-specific action extensions.
  */

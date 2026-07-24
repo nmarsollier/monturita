@@ -1,3 +1,12 @@
+/* TMC — tmc_init.c
+ *
+ * Purpose: initialise one or two TMC2209 stepper drivers over a
+ *          single-wire UART bus and configure microstepping, current,
+ *          and chopper mode.
+ *
+ * Both drivers share the same UART bus.  Each driver is addressed by
+ * its MS1/MS2 pin levels — see the TmcAxis table below.
+ */
 #include "tmc.h"
 #include "tmc_internal.h"
 
@@ -7,114 +16,44 @@
 #include "esp_log.h"
 #include "freertos/task.h"
 
-/*
- * ESP32 UART port used to communicate with both TMC2209 drivers.
- * UART_NUM_2 is chosen because UART_NUM_0 is the debug console and
- * UART_NUM_1 may be in use by other peripherals.
- */
-#define TMC_UART_NUM          UART_NUM_2
-#define TMC_BAUD_RATE         115200
+/* ── UART hardware ─────────────────────────────────────────── */
 
-/*
- * TMC2209 UART GPIO pins (separate ESP32 pads, shorted at the TMC side).
- * GPIO 17 = TX (data to drivers), GPIO 16 = RX (data from drivers).
- * Both connect to the same PDN_UART pin on the TMC2209 via a series
- * resistor on the TX leg.
- */
-#define ESP_UART_TX_GPIO      GPIO_NUM_17
-#define ESP_UART_RX_GPIO      GPIO_NUM_16
+#define TMC_UART_NUM     UART_NUM_2
+#define TMC_BAUD_RATE    115200
 
-/*
- * TMC2209 internal registers accessible via UART.
- * Reference: TMC2209 datasheet (Trinamic), section "Register Map".
- *
- *   GCONF      (0x00) — General driver configuration
- *   IFCNT      (0x02) — Received UART frame counter (read-only).
- *                        Increments by 1 on each successful write.
- *                        Useful for verifying the driver is responding.
- *   IOIN       (0x06) — Physical pin states (ENN, MS1, MS2, etc.)
- *   IHOLD_IRUN (0x10) — Hold current (IHOLD), run current (IRUN),
- *                        and transition delay (IHOLDDELAY).
- *   CHOPCONF   (0x6C) — Chopper configuration: MRES (microstep resolution),
- *                        operating mode (StealthChop / SpreadCycle),
- *                        interpolation, etc.
- */
-#define TMC_REG_GCONF         0x00
-#define TMC_REG_IFCNT         0x02
-#define TMC_REG_IOIN          0x06
-#define TMC_REG_IHOLD_IRUN    0x10
-#define TMC_REG_CHOPCONF      0x6C
+#define ESP_UART_TX_GPIO GPIO_NUM_17
+#define ESP_UART_RX_GPIO GPIO_NUM_18
 
-/*
- * Target microstep count to configure on both axes.
- * 128 microsteps per full step are used to obtain the maximum
- * resolution offered by the TMC2209 via UART.
- *
- * Hardware interpolation (intpol=1 in CHOPCONF) is also enabled,
- * meaning the driver internally generates 128 smooth microsteps
- * from each external STEP pulse, regardless of the actual MRES
- * value. This provides:
- *   - Ultra-smooth motion even at low tracking speeds
- *   - Reduced vibration and audible noise
- *   - Better response at low STEP frequencies
- */
-#define TMC_TARGET_MICROSTEPS 128
+/* ── TMC2209 register addresses ────────────────────────────── */
 
-/*
- * Bit masks for the TMC2209 GCONF register.
- * Reference: TMC2209 datasheet, Table 8.1 (GCONF).
- *
- *   GCONF_I_SCALE_ANALOG (Bit 0)
- *       1 — Motor current is controlled by the analog voltage on the
- *           VREF pin (external potentiometer).
- *       0 — Motor current is controlled digitally via the IHOLD_IRUN
- *           register over UART. Do NOT use the VREF pin.
- *       Forced to 0 in this configuration so current control is
- *       exclusively through software.
- *
- *   GCONF_MSTEP_REG_SELECT (Bit 7)
- *       1 — Microstep resolution (MRES) is set via the CHOPCONF register
- *           over UART (software control).
- *       0 — Resolution is determined by the MS1/MS2 pins.
- *       Forced to 1 to allow changing microsteps dynamically without
- *       hardware modifications.
- */
-#define GCONF_I_SCALE_ANALOG   (1U << 0)
-#define GCONF_MSTEP_REG_SELECT (1U << 7)
+#define TMC_REG_GCONF      0x00
+#define TMC_REG_IHOLD_IRUN 0x10
+#define TMC_REG_CHOPCONF   0x6C
+
+/* ── Target microstep resolution ───────────────────────────── */
+
+#define TMC_TARGET_MICROSTEPS  128
 
 static const char *TAG = "TMC_INIT";
 
-/*
- * Logical representation of a mount axis.
- *
- *   name    — "RA" or "DEC"
- *   address — UART address on the single-wire bus (RA=0x00, DEC=0x03)
- *   irun    — run current value (0-31)
- *   ihold   — hold current value (0-31)
- */
+/* ── Per-axis configuration ────────────────────────────────── */
+
 typedef struct {
     const char *name;
-    uint8_t address;
-    uint8_t irun;
-    uint8_t ihold;
+    uint8_t     address;   /* UART address (MS1/MS2 pins) */
+    uint8_t     irun;      /* run current   (0 – 31) */
+    uint8_t     ihold;     /* hold current  (0 – 31) */
 } TmcAxis;
 
 static const TmcAxis tmc_axes[] = {
-    {
-        .name = "RA",
-        .address = 0x00,
-        .irun = 30, /* ~1.32 A RMS (42x40mm, 1.5A rated) */
-        .ihold = 16 /* ~0.75 A RMS (42x40mm, 1.5A rated) */
-    },
-    {
-        .name = "DEC",
-        .address = 0x03,
-        .irun = 25, /* ~1.10 A RMS */
-        .ihold = 16 /* ~0.75 A RMS */
-    },
+    { .name = "RA",  .address = 0x03, .irun = 15, .ihold = 8 },
+    { .name = "DEC", .address = 0x00, .irun = 15, .ihold = 8 },
 };
 
-static uint8_t tmc_crc(const uint8_t *data, size_t len) {
+/* ── UART helpers ──────────────────────────────────────────── */
+
+static uint8_t tmc_crc(const uint8_t *data, size_t len)
+{
     uint8_t crc = 0;
     for (size_t i = 0; i < len; i++) {
         uint8_t byte = data[i];
@@ -130,139 +69,24 @@ static uint8_t tmc_crc(const uint8_t *data, size_t len) {
     return crc;
 }
 
-static bool tmc_mres_to_microsteps(uint8_t mres, uint16_t *microsteps) {
-    switch (mres) {
-        case 0: *microsteps = 256;
-            return true;
-        case 1: *microsteps = 128;
-            return true;
-        case 2: *microsteps = 64;
-            return true;
-        case 3: *microsteps = 32;
-            return true;
-        case 4: *microsteps = 16;
-            return true;
-        case 5: *microsteps = 8;
-            return true;
-        case 6: *microsteps = 4;
-            return true;
-        case 7: *microsteps = 2;
-            return true;
-        case 8: *microsteps = 1;
-            return true;
-        default: return false;
-    }
-}
-
-static bool tmc_microsteps_to_mres(uint16_t microsteps, uint8_t *mres) {
-    switch (microsteps) {
-        case 256: *mres = 0;
-            return true;
-        case 128: *mres = 1;
-            return true;
-        case 64: *mres = 2;
-            return true;
-        case 32: *mres = 3;
-            return true;
-        case 16: *mres = 4;
-            return true;
-        case 8: *mres = 5;
-            return true;
-        case 4: *mres = 6;
-            return true;
-        case 2: *mres = 7;
-            return true;
-        case 1: *mres = 8;
-            return true;
-        default: return false;
-    }
-}
-
-static esp_err_t tmc_read_register(uint8_t address, uint8_t reg, uint32_t *value) {
-    if (value == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint8_t request[4] = {
-        0x05,
-        address,
-        (uint8_t) (reg & 0x7F),
-        0x00,
-    };
-
-    request[3] = tmc_crc(request, 3);
-
-    uart_flush_input(TMC_UART_NUM);
-
-    int written = uart_write_bytes(TMC_UART_NUM, request, sizeof(request));
-    if (written != (int) sizeof(request)) {
-        return ESP_FAIL;
-    }
-
-    uart_wait_tx_done(TMC_UART_NUM, pdMS_TO_TICKS(10));
-
-    /* Absorb the 4-byte echo from the single-wire bus. */
-    uint8_t echo_buffer[4];
-    uart_read_bytes(TMC_UART_NUM, echo_buffer, sizeof(request), pdMS_TO_TICKS(10));
-
-    /* Read the TMC2209 response frame. */
-    uint8_t response[32];
-    int len = 0;
-    TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout = pdMS_TO_TICKS(100);
-
-    while ((xTaskGetTickCount() - start) < timeout && len < (int) sizeof(response)) {
-        int read = uart_read_bytes(
-            TMC_UART_NUM,
-            response + len,
-            sizeof(response) - len,
-            pdMS_TO_TICKS(5));
-
-        if (read > 0) {
-            len += read;
-        }
-    }
-
-    if (len < 8) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    for (int i = 0; i <= len - 8; i++) {
-        uint8_t *frame = &response[i];
-
-        if (frame[0] != 0x05) continue;
-        if ((frame[2] & 0x7F) != (reg & 0x7F)) continue;
-        if (tmc_crc(frame, 7) != frame[7]) continue;
-
-        *value = ((uint32_t) frame[3] << 24) |
-                 ((uint32_t) frame[4] << 16) |
-                 ((uint32_t) frame[5] << 8) |
-                 ((uint32_t) frame[6]);
-
-        return ESP_OK;
-    }
-
-    return ESP_ERR_INVALID_RESPONSE;
-}
-
-static esp_err_t tmc_write_register(uint8_t address, uint8_t reg, uint32_t value) {
+static esp_err_t tmc_write_register(uint8_t address, uint8_t reg, uint32_t value)
+{
     uint8_t request[8] = {
         0x05,
         address,
-        (uint8_t) (reg | 0x80),
-        (uint8_t) (value >> 24),
-        (uint8_t) (value >> 16),
-        (uint8_t) (value >> 8),
-        (uint8_t) value,
+        (uint8_t)(reg | 0x80),
+        (uint8_t)(value >> 24),
+        (uint8_t)(value >> 16),
+        (uint8_t)(value >> 8),
+        (uint8_t)(value),
         0x00,
     };
-
     request[7] = tmc_crc(request, 7);
 
     uart_flush_input(TMC_UART_NUM);
 
     int written = uart_write_bytes(TMC_UART_NUM, request, sizeof(request));
-    if (written != (int) sizeof(request)) {
+    if (written != (int)sizeof(request)) {
         return ESP_FAIL;
     }
 
@@ -275,190 +99,63 @@ static esp_err_t tmc_write_register(uint8_t address, uint8_t reg, uint32_t value
     return ESP_OK;
 }
 
-static esp_err_t tmc_read_microsteps(const TmcAxis *axis, uint32_t *chopconf, uint16_t *microsteps) {
-    if (axis == NULL || chopconf == NULL || microsteps == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
+/* ── Driver init (write-only) ──────────────────────────────── */
 
-    esp_err_t result = tmc_read_register(axis->address, TMC_REG_CHOPCONF, chopconf);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    uint8_t mres = (uint8_t) ((*chopconf >> 24) & 0x0F);
-    if (!tmc_mres_to_microsteps(mres, microsteps)) {
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    return ESP_OK;
-}
-
-static esp_err_t tmc_set_microsteps(const TmcAxis *axis, uint16_t microsteps) {
-    if (axis == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint8_t mres = 0;
-    if (!tmc_microsteps_to_mres(microsteps, &mres)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint32_t chopconf = 0;
-    uint16_t current_microsteps = 0;
-
-    esp_err_t result = tmc_read_microsteps(axis, &chopconf, &current_microsteps);
-    if (result != ESP_OK) {
-        ESP_LOGW(TAG, "%s failed reading CHOPCONF before update: %s", axis->name, esp_err_to_name(result));
-        return result;
-    }
-
-    // 1. Clear the old MRES mask (bits 24-27) and inject the new value
-    uint32_t updated = (chopconf & ~(0x0FU << 24)) | ((uint32_t) mres << 24);
-
-    // =========================================================================
-    // ASTRONOMICAL CONFIGURATION: SPREADCYCLE + INTERPOLATION
-    // =========================================================================
-
-    // Bit 14 = 1 -> SpreadCycle (more torque, slightly audible)
-    updated |= (1U << 14);
-
-    // Set Bit 28 (intpol = 1) -> Enable hardware interpolation to TMC_TARGET_MICROSTEPS microsteps
-    updated |= (1U << 28);
-
-    // =========================================================================
-
-    ESP_LOGI(TAG, "%s: Applying CHOPCONF (MRES=%u, SpreadCycle=ON, Intpol=ON)", axis->name, mres);
-
-    // 2. Write the optimised CHOPCONF register to the driver
-    result = tmc_write_register(axis->address, TMC_REG_CHOPCONF, updated);
-    if (result != ESP_OK) {
-        ESP_LOGW(TAG, "%s failed writing CHOPCONF: %s", axis->name, esp_err_to_name(result));
-        return result;
-    }
-
-    // 3. Hardware latch verification and validation
-    uint32_t verify_chopconf = 0;
-    uint16_t verify_microsteps = 0;
-
-    result = tmc_read_microsteps(axis, &verify_chopconf, &verify_microsteps);
-    if (result != ESP_OK) {
-        ESP_LOGW(TAG, "%s failed verifying microsteps: %s", axis->name, esp_err_to_name(result));
-        return result;
-    }
-
-    if (verify_microsteps != microsteps) {
-        ESP_LOGW(TAG, "%s microsteps not latched, expected=%u actual=%u", axis->name, microsteps, verify_microsteps);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    /*
-     * Update the global cache with the verified hardware value.
-     * Both axes are configured identically, so storing the last
-     * verified value is safe.
-     */
-    tmc2209_set_active_microsteps(verify_microsteps);
-
-    ESP_LOGI(TAG, "%s microsteps applied: %u (TMC2209 intpol→256, cache=%u)",
-             axis->name, verify_microsteps, tmc2209_get_active_microsteps());
-    return ESP_OK;
-}
-
-static esp_err_t tmc_init_driver(const TmcAxis *axis) {
-    uint32_t gconf = 0;
-    uint32_t ifcnt_before = 0;
-    uint32_t ifcnt_after = 0;
+static esp_err_t tmc_init_driver(const TmcAxis *axis)
+{
     esp_err_t result;
 
-    ESP_LOGI(TAG, "--- Initialising axis %s [Addr: 0x%02X] ---", axis->name, axis->address);
+    ESP_LOGI(TAG, "--- Initialising axis %s [Addr: 0x%02X] ---",
+             axis->name, axis->address);
 
-    // 1. Monitor internal frame counter before making changes
-    tmc_read_register(axis->address, TMC_REG_IFCNT, &ifcnt_before);
-
-    // 2. Read initial GCONF state
-    result = tmc_read_register(axis->address, TMC_REG_GCONF, &gconf);
+    /* GCONF: UART microstep control + digital current control. */
+    uint32_t gconf = 0x000000C0;    /* mstep_reg_select=1, i_scale_analog=0 */
+    result = tmc_write_register(axis->address, TMC_REG_GCONF, gconf);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: UART read failure on GCONF", axis->name);
+        ESP_LOGE(TAG, "%s: UART write failure on GCONF", axis->name);
         return result;
     }
 
-    // 3. GCONF modifications:
-    //    - Enable mstep_reg_select (Bit 7) -> Allow microstep changes via software
-    //    - Disable i_scale_analog (Bit 0) -> Turn off physical VREF, ignore potentiometer
-    gconf |= GCONF_MSTEP_REG_SELECT;
-    gconf &= ~GCONF_I_SCALE_ANALOG;
-
-    result = tmc_write_register(axis->address, TMC_REG_GCONF, gconf);
-    if (result != ESP_OK) return result;
-
-    // 4. Configure motor current (per-axis IRUN and IHOLD)
-    uint32_t ihold_irun_val = (uint32_t) axis->ihold |
-                              (1U << 8) | /* IHOLDDELAY = 1 */
-                              ((uint32_t) axis->irun << 16);
-
-    result = tmc_write_register(axis->address, TMC_REG_IHOLD_IRUN, ihold_irun_val);
-    if (result != ESP_OK) return result;
-
-    // 5. Verify hardware IFCNT increment (GCONF + IHOLD_IRUN = +2 successful writes)
-    tmc_read_register(axis->address, TMC_REG_IFCNT, &ifcnt_after);
-    ESP_LOGI(TAG, "%s: IFCNT increment verified: %lu -> %lu",
-             axis->name, ifcnt_before & 0xFF, ifcnt_after & 0xFF);
-
-    // 6. Set target microsteps
-    result = tmc_set_microsteps(axis, TMC_TARGET_MICROSTEPS);
-
-    return result;
-}
-
-static void tmc_log_current_status(const TmcAxis *axis) {
-    uint32_t gconf = 0;
-    uint32_t chopconf = 0;
-    uint32_t ioin = 0;
-    uint16_t msteps = 0;
-
-    // Read current registers directly from the chip
-    esp_err_t r1 = tmc_read_register(axis->address, TMC_REG_GCONF, &gconf);
-    esp_err_t r2 = tmc_read_register(axis->address, TMC_REG_CHOPCONF, &chopconf);
-    esp_err_t r3 = tmc_read_register(axis->address, TMC_REG_IOIN, &ioin);
-
-    if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK) {
-        ESP_LOGE(TAG, "[%s] Unable to read current UART status", axis->name);
-        return;
+    /* IHOLD_IRUN: hold + run current, IHOLDDELAY = 1. */
+    uint32_t ihold_irun = (uint32_t)axis->ihold
+                        | (1U << 8)                    /* IHOLDDELAY */
+                        | ((uint32_t)axis->irun << 16);
+    result = tmc_write_register(axis->address, TMC_REG_IHOLD_IRUN, ihold_irun);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "%s: UART write failure on IHOLD_IRUN", axis->name);
+        return result;
     }
 
-    // Extract microsteps from the read CHOPCONF bits
-    uint8_t mres = (uint8_t) ((chopconf >> 24) & 0x0F);
-    tmc_mres_to_microsteps(mres, &msteps);
+    /* CHOPCONF: MRES=1 (128 µsteps), SpreadCycle, interpolation to 256. */
+    uint32_t chopconf = 0x10410153;      /* power-on default */
+    chopconf &= ~(0x0FU << 24);          /* clear MRES */
+    chopconf |=  (1U << 24);             /* MRES = 1 → 128 µsteps */
+    chopconf |=  (1U << 14);             /* SpreadCycle */
+    chopconf |=  (1U << 28);             /* intpol → 256 µsteps */
 
-    // Decode critical control flags
-    bool mstep_by_uart = (gconf & GCONF_MSTEP_REG_SELECT) != 0;
-    bool current_by_vref = (gconf & GCONF_I_SCALE_ANALOG) != 0;
+    result = tmc_write_register(axis->address, TMC_REG_CHOPCONF, chopconf);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "%s: UART write failure on CHOPCONF", axis->name);
+        return result;
+    }
 
-    // The physical ENN (Enable) pin is read on IOIN bit 0 (inverted in silicon: 0 = Enabled)
-    bool driver_enabled = (ioin & (1U << 0)) == 0;
+    tmc2209_set_active_microsteps(TMC_TARGET_MICROSTEPS);
 
-    ESP_LOGI(TAG, "=============================================");
-    ESP_LOGI(TAG, " FINAL HARDWARE REPORT - AXIS: %s", axis->name);
-    ESP_LOGI(TAG, "=============================================");
-    ESP_LOGI(TAG, " UART Address        : 0x%02X", axis->address);
-    ESP_LOGI(TAG, " GCONF Register      : 0x%08lX", gconf);
-    ESP_LOGI(TAG, " CHOPCONF Register   : 0x%08lX", chopconf);
-    ESP_LOGI(TAG, " IOIN Register       : 0x%08lX", ioin);
-    ESP_LOGI(TAG, " Microstep Control   : %s", mstep_by_uart ? "DIGITAL (UART)" : "PHYSICAL (MS1/MS2 pins)");
-    ESP_LOGI(TAG, " MRES Configuration  : %u (Microsteps: %u)", mres, msteps);
-    ESP_LOGI(TAG, " Current Control     : %s",
-             current_by_vref ? "ANALOG (VREF potentiometer)" : "DIGITAL (UART register)");
-    ESP_LOGI(TAG, " Driver State        : %s",
-             driver_enabled ? "ENABLED (Pins active)" : "DISABLED (Motor free)");
-    ESP_LOGI(TAG, "=============================================");
+    ESP_LOGI(TAG, "%s: configured (µsteps=%u, irun=%u, ihold=%u)",
+             axis->name, TMC_TARGET_MICROSTEPS, axis->irun, axis->ihold);
+    return ESP_OK;
 }
 
-esp_err_t tmc2209_hw_init(void) {
+/* ── Public entry point ────────────────────────────────────── */
+
+esp_err_t tmc2209_hw_init(void)
+{
     uart_config_t config = {
-        .baud_rate = TMC_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .baud_rate  = TMC_BAUD_RATE,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
 
@@ -468,37 +165,17 @@ esp_err_t tmc2209_hw_init(void) {
     result = uart_param_config(TMC_UART_NUM, &config);
     if (result != ESP_OK) return result;
 
-    /*
-     * TX and RX are separate ESP32 pads (GPIO 17, GPIO 16) but share the
-     * same TMC2209 PDN_UART pin via a series resistor on the TX leg.
-     *
-     * No open-drain GPIO reconfiguration is done here — that would risk
-     * disconnecting the pin from the UART peripheral through the IO MUX.
-     * Instead, the read path (tmc_read_register) temporarily floats the
-     * TX pin by switching it to input before receiving the TMC response,
-     * and restores it to UART-controlled output afterwards.
-     */
     result = uart_set_pin(TMC_UART_NUM,
                           ESP_UART_TX_GPIO, ESP_UART_RX_GPIO,
                           UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (result != ESP_OK) return result;
 
-    /*
-     * Enable a weak internal pull-up on the RX pin so the single-wire bus
-     * has a defined idle level when neither the ESP32 nor the TMC2209 is
-     * driving it.
-     */
     gpio_set_pull_mode(ESP_UART_RX_GPIO, GPIO_PULLUP_ONLY);
 
-    // Initialisation loop for RA and DEC axes
     for (size_t i = 0; i < sizeof(tmc_axes) / sizeof(tmc_axes[0]); i++) {
         result = tmc_init_driver(&tmc_axes[i]);
         if (result != ESP_OK) {
             ESP_LOGE(TAG, "Error initialising axis %s", tmc_axes[i].name);
-        } else {
-            // If initialisation succeeded, read and report the current state cleanly
-            vTaskDelay(pdMS_TO_TICKS(10));
-            tmc_log_current_status(&tmc_axes[i]);
         }
         vTaskDelay(pdMS_TO_TICKS(15));
     }

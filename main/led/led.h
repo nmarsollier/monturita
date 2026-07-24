@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /*
- * LED states for the external indicator on GPIO 23.
+ * LED states for the external indicator on GPIO 4.
  *
  * NORMAL  — dim brightness, mount idle.
  * SLEWING — full brightness, mount in motion.
@@ -16,7 +16,7 @@ typedef enum {
     LED_STATE_ERROR
 } LedState;
 
-/* Initialise LEDC PWM on GPIO 23 and start in NORMAL (dim). */
+/* Initialise LEDC PWM on GPIO 4 and start in NORMAL (dim). */
 void led_init(void);
 
 /*

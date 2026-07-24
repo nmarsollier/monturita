@@ -1,4 +1,4 @@
-/* Network - network_sntp.c
+/* Wifi - wifi_sntp.c
  *
  * Purpose: synchronise the system clock via SNTP as soon as WiFi connects.
  *
@@ -12,7 +12,7 @@
  * to a short-lived background task so we never block the event loop.
  */
 
-#include "network.h"
+#include "wifi.h"
 
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
@@ -20,7 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "NETWORK_SNTP";
+static const char *TAG = "WIFI_SNTP";
 
 /*
  * Multiple NTP pools for redundancy.  The ESP-IDF SNTP client cycles
@@ -61,7 +61,6 @@ static void sntp_task(void *arg) {
      * a query every ~60 s by default after start, but the first one should
      * fire within a few seconds.  We poll quickly for responsiveness.
      */
-    bool synced = false;
     for (int retry = 0; retry < 300; retry++) {
         if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
             time_t now;
@@ -72,7 +71,6 @@ static void sntp_task(void *arg) {
                      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
                      timeinfo.tm_mday, timeinfo.tm_hour,
                      timeinfo.tm_min, timeinfo.tm_sec);
-            synced = true;
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -81,6 +79,6 @@ static void sntp_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-void network_sntp_start(void) {
+void wifi_sntp_start(void) {
     xTaskCreate(sntp_task, "sntp_sync", 3072, NULL, 1, NULL);
 }
