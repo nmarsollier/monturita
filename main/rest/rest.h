@@ -43,4 +43,6 @@ void rest_send_result(
     httpd_req_t *request,
     MountResult result);
 
-MotorAxis motors_axis_from_string(const char *value);
+/* Axis string helpers for REST API parameter parsing. */
+MotorAxis rest_axis_from_string(const char *value);
+const char *rest_axis_valid_values(void);

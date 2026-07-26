@@ -68,8 +68,7 @@
  * HOME_RA_OFFSET_DEG (90.0)
  *   RA axis angle at which the DEC plane aligns with the meridian.
  *
- * RA_LIMIT_DEG (100.0)  — matches motor hardware limit.
- * DEC_LIMIT_DEG (150.0) — matches motor hardware limit.
+ * Axis limits are defined in motors_init.c (single source of truth).
  *
  * POLE_THRESHOLD_DEG (1.0)
  *   When |dec_axis| < 1 the scope is at the pole; RA is singular.

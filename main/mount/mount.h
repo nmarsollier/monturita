@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "motors/motors.h"
 
-/* Use `MotorAxis` from the motors package for mount axis operations. */
+/* MotorAxis is defined in rest/rest.h */
 
 typedef struct {
     float lat;
@@ -199,23 +199,22 @@ float mount_get_dec_deg(void);
 /* Compute the current Local Sidereal Time for the configured site. */
 float mount_get_lst(void);
 
-TrackingMode motors_tracking_from_string(const char *value);
-
 /*
  * mount_pulse_guide
  * -----------------
  * Execute a guide pulse on the specified astronomical direction for the
- * given duration in milliseconds.  Rejected if the mount is slewing,
- * moving, parked, or disabled.  Coexists with tracking.
+ * given duration in milliseconds.  Rejected if the mount status is not
+ * READY or TRACKING.  Coexists with tracking.
  *
- * Guide rate is taken from the stored alpaca_bridge guide rate (deg/s).
+ * Guide rate is read from the per-axis guide rate stored in this module.
  */
 MountResult mount_pulse_guide(GuideDirection direction, uint32_t duration_ms);
 
 /*
  * mount_set_guide_rate / mount_get_guide_rate
  * -------------------------------------------
- * Store or retrieve the guide rate for the given axis in degrees/second.
+ * Store or retrieve the guide rate for the given axis in degrees/second,
+ * per axis for Alpaca compliance.
  */
 void mount_set_guide_rate_ra(float rate_dps);
 void mount_set_guide_rate_dec(float rate_dps);

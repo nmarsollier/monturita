@@ -4,7 +4,7 @@
  * directions (North/South/East/West) to signed RA/DEC speed offsets,
  * and delegate to the motors layer.
  *
- * Direction mapping (northern hemisphere, pre-meridian-flip):
+ * Direction mapping (offset added to base tracking speed):
  *   East  → +RA  (track faster — move scope east)
  *   West  → -RA  (track slower — move scope west)
  *   North → +DEC
@@ -20,11 +20,10 @@
 static const char *TAG = "MOUNT_PULSE_GUIDE";
 
 MountResult mount_pulse_guide(GuideDirection direction, uint32_t duration_ms) {
-    /* Reject during non-guideable states. */
+    /* PulseGuide is only valid in READY (calibration) or TRACKING (guiding). */
     MotorsState state = motors_current_state();
-    if (state.status == MOTORS_STATUS_SLEWING ||
-        state.status == MOTORS_STATUS_PARKED ||
-        state.status == MOTORS_STATUS_DISABLED) {
+    if (state.status != MOTORS_STATUS_READY &&
+        state.status != MOTORS_STATUS_TRACKING) {
         ESP_LOGW(TAG, "Rejected: mount status=%s",
                  motors_status_to_string(state.status));
         return mount_result_error("Mount not ready for PulseGuide");
@@ -59,8 +58,11 @@ MountResult mount_pulse_guide(GuideDirection direction, uint32_t duration_ms) {
 
 /* ── Guide rate storage (deg/s) ──────────────────────────────── */
 
-static float s_guide_rate_ra  = 0.002089037f; /* 0.5× sidereal */
-static float s_guide_rate_dec = 0.002089037f;
+/* Mirror of the value in motors_get_tracking_speed.c (single source of truth). */
+#define TRACKING_SPEED_SIDEREAL_DPS 0.004178074f
+
+static float s_guide_rate_ra  = TRACKING_SPEED_SIDEREAL_DPS * 0.5f;
+static float s_guide_rate_dec = TRACKING_SPEED_SIDEREAL_DPS * 0.5f;
 
 void mount_set_guide_rate_ra(float rate_dps)  { s_guide_rate_ra = rate_dps; }
 void mount_set_guide_rate_dec(float rate_dps) { s_guide_rate_dec = rate_dps; }

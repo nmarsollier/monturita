@@ -30,11 +30,9 @@
 #define TMC_REG_IHOLD_IRUN 0x10
 #define TMC_REG_CHOPCONF   0x6C
 
-/* ── Target microstep resolution ───────────────────────────── */
+/* ── Target microstep resolution — see TMC_TARGET_MICROSTEPS in tmc.h ── */
 
-#define TMC_TARGET_MICROSTEPS  128
-
-/* Convert TMC_TARGET_MICROSTEPS to the MRES register field.
+/* Convert the target microstep count to the MRES register field.
  * TMC2209 MRES mapping: 256→0, 128→1, 64→2, 32→3, 16→4, 8→5, 4→6, 2→7, 1→8 */
 static uint8_t tmc_microsteps_to_mres(uint16_t ms) {
     switch (ms) {
@@ -257,12 +255,12 @@ static esp_err_t tmc_init_driver(const TmcAxis *axis)
     /* Verify GCONF — mstep_reg_select (bit 7) must be set. */
     result = tmc_read_register(axis->address, TMC_REG_GCONF, &verify);
     if (result != ESP_OK) {
-        ESP_LOGW(TAG, "%s: cannot read back GCONF (%s) — continuing",
+        ESP_LOGE(TAG, "%s: cannot read back GCONF (%s)",
                  axis->name, esp_err_to_name(result));
+        return ESP_FAIL;
     } else if (!(verify & (1U << 7))) {
-        ESP_LOGE(TAG, "%s: GCONF mstep_reg_select NOT latched! (read 0x%08lX, expected bit 7 set)",
+        ESP_LOGW(TAG, "%s: GCONF mstep_reg_select NOT latched! (read 0x%08lX, expected bit 7 set)",
                  axis->name, (unsigned long)verify);
-        ESP_LOGE(TAG, "%s: TMC2209 may be using pin-controlled microsteps — movement will be wrong!", axis->name);
     } else {
         ESP_LOGI(TAG, "%s: GCONF verified (0x%08lX, mstep_reg_select=1, i_scale_analog=%lu)",
                  axis->name, (unsigned long)verify, (unsigned long)(verify & 1U));
@@ -295,37 +293,36 @@ static esp_err_t tmc_init_driver(const TmcAxis *axis)
     uint16_t verified_msteps = 0;
     result = tmc_read_register(axis->address, TMC_REG_CHOPCONF, &verify);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: cannot read back CHOPCONF (%s) — µsteps UNVERIFIED!",
+        ESP_LOGE(TAG, "%s: cannot read back CHOPCONF (%s)",
                  axis->name, esp_err_to_name(result));
-        /* Cache the intended value anyway so the mount can operate,
-         * but the log makes it clear verification failed. */
-        tmc2209_set_active_microsteps(TMC_TARGET_MICROSTEPS);
-    } else {
-        uint8_t mres = (uint8_t)((verify >> 24) & 0x0F);
-        bool intpol_ok = (verify & (1U << 28)) != 0;
-        bool spread_ok = (verify & (1U << 14)) != 0;
-
-        if (!tmc_mres_to_microsteps(mres, &verified_msteps)) {
-            ESP_LOGE(TAG, "%s: CHOPCONF readback has invalid MRES=%u (0x%08lX)",
-                     axis->name, mres, (unsigned long)verify);
-            tmc2209_set_active_microsteps(TMC_TARGET_MICROSTEPS);
-        } else if (verified_msteps != TMC_TARGET_MICROSTEPS) {
-            ESP_LOGE(TAG, "%s: CHOPCONF MRES MISMATCH! wrote=%u µsteps, hardware=%u µsteps (0x%08lX)",
-                     axis->name, TMC_TARGET_MICROSTEPS, verified_msteps, (unsigned long)verify);
-            /* Cache what the hardware ACTUALLY has — this is the source of truth. */
-            tmc2209_set_active_microsteps(verified_msteps);
-        } else {
-            ESP_LOGI(TAG, "%s: CHOPCONF verified — %u µsteps, intpol=%s, SpreadCycle=%s (0x%08lX)",
-                     axis->name, verified_msteps,
-                     intpol_ok ? "ON" : "OFF",
-                     spread_ok ? "ON" : "OFF",
-                     (unsigned long)verify);
-            tmc2209_set_active_microsteps(verified_msteps);
-        }
+        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "%s: init complete (cached µsteps=%u, irun=%u, ihold=%u)",
-             axis->name, tmc2209_get_active_microsteps(), axis->irun, axis->ihold);
+    uint8_t mres = (uint8_t)((verify >> 24) & 0x0F);
+    bool intpol_ok = (verify & (1U << 28)) != 0;
+    bool spread_ok = (verify & (1U << 14)) != 0;
+
+    if (!tmc_mres_to_microsteps(mres, &verified_msteps)) {
+        ESP_LOGE(TAG, "%s: CHOPCONF readback has invalid MRES=%u (0x%08lX)",
+                 axis->name, mres, (unsigned long)verify);
+        return ESP_FAIL;
+    }
+
+    if (verified_msteps != TMC_TARGET_MICROSTEPS) {
+        ESP_LOGE(TAG, "%s: CHOPCONF MRES MISMATCH! wrote=%u µsteps, hardware=%u µsteps (0x%08lX)",
+                 axis->name, TMC_TARGET_MICROSTEPS, verified_msteps, (unsigned long)verify);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "%s: CHOPCONF verified — %u µsteps, intpol=%s, SpreadCycle=%s (0x%08lX)",
+             axis->name, verified_msteps,
+             intpol_ok ? "ON" : "OFF",
+             spread_ok ? "ON" : "OFF",
+             (unsigned long)verify);
+    tmc2209_set_active_microsteps(verified_msteps);
+
+    ESP_LOGI(TAG, "%s: init complete (µsteps=%u, irun=%u, ihold=%u)",
+             axis->name, verified_msteps, axis->irun, axis->ihold);
     return ESP_OK;
 }
 
@@ -357,12 +354,21 @@ esp_err_t tmc2209_hw_init(void)
 
     tmc_scan_bus();
 
+    bool all_ok = true;
     for (size_t i = 0; i < sizeof(tmc_axes) / sizeof(tmc_axes[0]); i++) {
         result = tmc_init_driver(&tmc_axes[i]);
         if (result != ESP_OK) {
             ESP_LOGE(TAG, "Error initialising axis %s", tmc_axes[i].name);
+            all_ok = false;
         }
         vTaskDelay(pdMS_TO_TICKS(15));
     }
+
+    if (!all_ok) {
+        tmc2209_set_active_microsteps(0);
+        ESP_LOGE(TAG, "One or more TMC2209 axes failed to initialise — mount inoperable");
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }
