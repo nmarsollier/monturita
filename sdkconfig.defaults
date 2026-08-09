@@ -26,3 +26,14 @@ CONFIG_LWIP_MAX_SOCKETS=32
 
 # SNTP: multiple servers for redundancy
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# ── CPU affinity: all non-motion tasks pinned to CPU 0 ──
+# CPU 1 is reserved exclusively for the motors_motion task (prio 23).
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0=y
+CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0=y
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+
+# ── RMT: ISR in IRAM for minimum latency ──
+CONFIG_RMT_ISR_IRAM_SAFE=y

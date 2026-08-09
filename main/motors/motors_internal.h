@@ -193,6 +193,16 @@ esp_err_t motors_rmt_transmit_ra(const rmt_symbol_word_t *symbols,
 esp_err_t motors_rmt_transmit_dec(const rmt_symbol_word_t *symbols,
                                    uint32_t num_symbols);
 
+/*
+ * Pipelined transmit — no semaphore drain before launching.
+ * Used by the double-buffered slewing loop after the first batch.
+ */
+esp_err_t motors_rmt_transmit_no_drain_ra(const rmt_symbol_word_t *symbols,
+                                           uint32_t num_symbols);
+
+esp_err_t motors_rmt_transmit_no_drain_dec(const rmt_symbol_word_t *symbols,
+                                            uint32_t num_symbols);
+
 esp_err_t motors_rmt_wait_ra(TickType_t timeout_ticks);
 
 esp_err_t motors_rmt_wait_dec(TickType_t timeout_ticks);

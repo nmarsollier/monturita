@@ -116,6 +116,13 @@ float motors_get_dec_deg(void);
 void motors_stop(void);
 
 /*
+ * Returns true when the currently executing motion is a MoveAxis command.
+ * Useful for deciding whether a Rate=0 should actually stop motion or is
+ * just a stale "button released" signal from the MoveAxis client.
+ */
+bool motors_is_active_move_axis(void);
+
+/*
  * Park both axes: stop motion and set status to PARKED.
  */
 void motors_park(void);

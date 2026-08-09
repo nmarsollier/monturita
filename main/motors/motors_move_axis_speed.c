@@ -11,7 +11,12 @@
 
 void motors_set_move_axis_speed(float ra_speed, float dec_speed) {
     if ((int) ra_speed == 0 && (int) dec_speed == 0) {
-        motors_stop();
+        /* Only abort if the active motion is a MoveAxis command.
+         * If a SLEW (goto) is running, a stray Rate=0 must not
+         * kill it — Rate=0 is just the "button released" signal
+         * from the MoveAxis client. */
+        if (motors_is_active_move_axis())
+            motors_stop();
         return;
     }
 

@@ -80,5 +80,6 @@ static void sntp_task(void *arg) {
 }
 
 void wifi_sntp_start(void) {
-    xTaskCreate(sntp_task, "sntp_sync", 3072, NULL, 1, NULL);
+    xTaskCreatePinnedToCore(sntp_task, "sntp_sync", 3072, NULL, 1, NULL,
+                0);  /* CPU 0 */
 }

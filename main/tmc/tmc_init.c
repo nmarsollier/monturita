@@ -95,6 +95,7 @@ static void tmc_scan_bus(void)
     ESP_LOGI(TAG, "=== Scanning UART bus for TMC2209 drivers ===");
 
     for (uint8_t addr = 0; addr <= 3; addr++) {
+        if (addr > 0) vTaskDelay(pdMS_TO_TICKS(5));
         uint32_t gconf = 0;
         esp_err_t err = tmc_read_register(addr, TMC_REG_GCONF, &gconf);
         if (err == ESP_OK) {
@@ -165,9 +166,12 @@ static esp_err_t tmc_write_register(uint8_t address, uint8_t reg, uint32_t value
  * Read a TMC2209 register over the single-wire UART bus.
  *
  * The ESP32 TX (GPIO 17) and RX (GPIO 18) share the TMC2209 PDN_UART pin
- * through a series resistor on TX.  After sending the read request the TX
- * pad is temporarily switched to input so the TMC2209 can drive the line
- * for its 8-byte response without the ESP32 TX output stage fighting it.
+ * through a 1 kΩ series resistor on TX.  After sending the read request
+ * and draining the loopback echo, TX is floated so the TMC2209 open-drain
+ * output can drive the line cleanly for its 8-byte response.
+ *
+ * Retries up to 2 additional times on timeout or invalid response —
+ * single-wire UART reads are inherently prone to occasional corruption.
  */
 static esp_err_t tmc_read_register(uint8_t address, uint8_t reg, uint32_t *value)
 {
@@ -181,57 +185,77 @@ static esp_err_t tmc_read_register(uint8_t address, uint8_t reg, uint32_t *value
     };
     request[3] = tmc_crc(request, 3);
 
-    uart_flush_input(TMC_UART_NUM);
+    esp_err_t last_err = ESP_FAIL;
 
-    int written = uart_write_bytes(TMC_UART_NUM, request, sizeof(request));
-    if (written != (int)sizeof(request)) return ESP_FAIL;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0)
+            vTaskDelay(pdMS_TO_TICKS(10));
 
-    uart_wait_tx_done(TMC_UART_NUM, pdMS_TO_TICKS(10));
+        uart_flush_input(TMC_UART_NUM);
 
-    /* Absorb the 4-byte echo. */
-    uint8_t echo_buf[4];
-    uart_read_bytes(TMC_UART_NUM, echo_buf, sizeof(request), pdMS_TO_TICKS(10));
+        int written = uart_write_bytes(TMC_UART_NUM, request, sizeof(request));
+        if (written != (int)sizeof(request)) return ESP_FAIL;
 
-    /*
-     * Float the TX pin so the TMC2209 can drive the shared bus.
-     * RX stays configured as UART input through the IO MUX.
-     */
-    gpio_set_direction(ESP_UART_TX_GPIO, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(ESP_UART_TX_GPIO, GPIO_PULLUP_ONLY);
+        uart_wait_tx_done(TMC_UART_NUM, pdMS_TO_TICKS(10));
 
-    /* Collect the 8-byte TMC2209 response frame. */
-    uint8_t response[32];
-    int len = 0;
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(50);
+        /* Drain the 4-byte loopback echo first — the 1 kΩ series
+         * resistor allows the TMC to already drive its response bits
+         * through without electrical conflict. */
+        uint8_t echo_buf[4];
+        uart_read_bytes(TMC_UART_NUM, echo_buf, sizeof(request), pdMS_TO_TICKS(10));
 
-    while (xTaskGetTickCount() < deadline && len < (int)sizeof(response)) {
-        int n = uart_read_bytes(TMC_UART_NUM, response + len,
-                                sizeof(response) - len, pdMS_TO_TICKS(5));
-        if (n > 0) len += n;
+        /*
+         * Float TX so the TMC2209 open-drain output has a clean,
+         * high-impedance line to drive for the remainder of its
+         * 8-byte response frame (the internal pull-up holds the
+         * idle HIGH level).
+         */
+        gpio_set_direction(ESP_UART_TX_GPIO, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(ESP_UART_TX_GPIO, GPIO_PULLUP_ONLY);
+
+        /* Collect the remaining bytes of the 12-byte combined
+         * (echo + reply) stream.  Up to 32 bytes are buffered to
+         * tolerate a few extra framing / noise bytes. */
+        uint8_t response[32];
+        int len = 0;
+        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(50);
+
+        while (xTaskGetTickCount() < deadline && len < (int)sizeof(response)) {
+            int n = uart_read_bytes(TMC_UART_NUM, response + len,
+                                    sizeof(response) - len, pdMS_TO_TICKS(5));
+            if (n > 0) len += n;
+        }
+
+        /* Restore TX — drive HIGH before enabling the output so the
+         * bus doesn't glitch LOW while the IO MUX is reconnected. */
+        gpio_set_level(ESP_UART_TX_GPIO, 1);
+        gpio_set_direction(ESP_UART_TX_GPIO, GPIO_MODE_OUTPUT);
+        uart_set_pin(TMC_UART_NUM, ESP_UART_TX_GPIO, ESP_UART_RX_GPIO,
+                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+
+        if (len < 8) {
+            last_err = ESP_ERR_TIMEOUT;
+            continue;
+        }
+
+        /* Find and validate a frame in the response buffer. */
+        for (int i = 0; i <= len - 8; i++) {
+            uint8_t *frame = &response[i];
+            if (frame[0] != 0x05) continue;
+            if ((frame[2] & 0x7F) != (reg & 0x7F)) continue;
+            if (tmc_crc(frame, 7) != frame[7]) continue;
+
+            *value = ((uint32_t)frame[3] << 24) |
+                     ((uint32_t)frame[4] << 16) |
+                     ((uint32_t)frame[5] << 8)  |
+                     ((uint32_t)frame[6]);
+            return ESP_OK;
+        }
+
+        last_err = ESP_ERR_INVALID_RESPONSE;
     }
 
-    /* Restore TX to UART-controlled output. */
-    gpio_set_direction(ESP_UART_TX_GPIO, GPIO_MODE_OUTPUT);
-    uart_set_pin(TMC_UART_NUM, ESP_UART_TX_GPIO, ESP_UART_RX_GPIO,
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    if (len < 8) return ESP_ERR_TIMEOUT;
-
-    /* Find and validate a frame in the response buffer. */
-    for (int i = 0; i <= len - 8; i++) {
-        uint8_t *frame = &response[i];
-        if (frame[0] != 0x05) continue;
-        if ((frame[2] & 0x7F) != (reg & 0x7F)) continue;
-        if (tmc_crc(frame, 7) != frame[7]) continue;
-
-        *value = ((uint32_t)frame[3] << 24) |
-                 ((uint32_t)frame[4] << 16) |
-                 ((uint32_t)frame[5] << 8)  |
-                 ((uint32_t)frame[6]);
-        return ESP_OK;
-    }
-
-    return ESP_ERR_INVALID_RESPONSE;
+    return last_err;
 }
 
 /* ── Driver init (write + verify) ──────────────────────────── */
@@ -353,6 +377,10 @@ esp_err_t tmc2209_hw_init(void)
     gpio_set_pull_mode(ESP_UART_RX_GPIO, GPIO_PULLUP_ONLY);
 
     tmc_scan_bus();
+
+    /* Let the bus settle after probing all addresses before
+     * we start writing to real drivers. */
+    vTaskDelay(pdMS_TO_TICKS(20));
 
     bool all_ok = true;
     for (size_t i = 0; i < sizeof(tmc_axes) / sizeof(tmc_axes[0]); i++) {

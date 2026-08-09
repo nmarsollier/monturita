@@ -91,8 +91,9 @@ static void udp_alpaca_task(void *arg) {
 /* ─── Public API ─── */
 
 void udp_alpaca_start(void) {
-    xTaskCreate(udp_alpaca_task, "alpaca_disc",
+    xTaskCreatePinnedToCore(udp_alpaca_task, "alpaca_disc",
                 DISCOVERY_TASK_STACK_WORDS, NULL,
-                DISCOVERY_TASK_PRIORITY, NULL);
+                DISCOVERY_TASK_PRIORITY, NULL,
+                0);  /* CPU 0 */
     ESP_LOGI(TAG, "Task created");
 }

@@ -24,8 +24,9 @@ static const char *TAG = "MOTORS_RMT";
 /* --------------------------------------------------------------------------
  * Hardware constants
  * -------------------------------------------------------------------------- */
-#define RMT_MEM_BLOCK_SYMBOLS 48U       /* symbols per mem block for non-DMA */
-#define RMT_TRANS_QUEUE_DEPTH 2U        /* one active + one queued */
+#define RMT_MEM_BLOCK_DMA    1024U      /* DMA ping-pong half-buffer (RA)      */
+#define RMT_MEM_BLOCK_NODMA    48U      /* FIFO symbols for non-DMA (DEC)      */
+#define RMT_TRANS_QUEUE_DEPTH   4U      /* queue depth for double-buffering    */
 
 /* RMT symbol max duration per half — 15-bit field. */
 #define RMT_DURATION_MAX  32767U
@@ -102,8 +103,9 @@ static esp_err_t create_channel(gpio_num_t gpio, rmt_chan_ctx_t *ctx,
         .gpio_num = gpio,
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = RMT_RESOLUTION_HZ,
-        .mem_block_symbols = RMT_MEM_BLOCK_SYMBOLS,
+        .mem_block_symbols = with_dma ? RMT_MEM_BLOCK_DMA : RMT_MEM_BLOCK_NODMA,
         .trans_queue_depth = RMT_TRANS_QUEUE_DEPTH,
+        .intr_priority = 3,
         .flags.with_dma = with_dma,
     };
 
@@ -339,24 +341,16 @@ uint32_t motors_rmt_encode_steps(rmt_symbol_word_t *symbols,
  * -------------------------------------------------------------------------- */
 
 /*
- * Transmit symbols on one channel.  Enables the RMT channel on the
- * first call (rmt_enable arms the interrupt so the done callback fires).
- * Subsequent calls are no-ops for enable since the channel is already on.
+ * Enable the RMT channel on the first call.  rmt_enable() arms the
+ * TX-done interrupt, without which the ISR callback never fires and
+ * the semaphore stays blocked.  Subsequent calls are no-ops.
  */
-static esp_err_t transmit_channel(rmt_chan_ctx_t *ctx,
-                                   const rmt_symbol_word_t *symbols,
-                                   uint32_t num_symbols)
+static esp_err_t ensure_channel_enabled(rmt_chan_ctx_t *ctx)
 {
     if (ctx->channel == NULL || ctx->encoder == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /*
-     * Enable the channel before the first transmission.
-     * rmt_enable() arms the TX-done interrupt, without which the
-     * ISR callback never fires and the semaphore stays blocked.
-     * Called only once per channel lifetime.
-     */
     if (!ctx->enabled) {
         esp_err_t enable_err = rmt_enable(ctx->channel);
         if (enable_err != ESP_OK) {
@@ -365,23 +359,75 @@ static esp_err_t transmit_channel(rmt_chan_ctx_t *ctx,
         }
         ctx->enabled = true;
     }
+    return ESP_OK;
+}
+
+/*
+ * Drain any stale semaphore count — used once at the start of a
+ * pipelined motion loop to clear residue from a prior abort.
+ */
+static void drain_channel(rmt_chan_ctx_t *ctx)
+{
+    if (ctx->done_sem != NULL) {
+        xSemaphoreTake(ctx->done_sem, 0);
+    }
+}
+
+/*
+ * Transmit symbols on one channel.  Drains any stale semaphore count
+ * before launching the transmission.  Used by standalone (non-pipelined)
+ * callers such as the tracking loop.
+ */
+static esp_err_t transmit_channel(rmt_chan_ctx_t *ctx,
+                                   const rmt_symbol_word_t *symbols,
+                                   uint32_t num_symbols)
+{
+    esp_err_t err = ensure_channel_enabled(ctx);
+    if (err != ESP_OK) return err;
 
     /* Drain any stale semaphore count from a previous abort. */
-    xSemaphoreTake(ctx->done_sem, 0);
+    drain_channel(ctx);
 
     rmt_transmit_config_t tx_cfg = {
         .loop_count = 0,
     };
 
     size_t payload_bytes = num_symbols * sizeof(rmt_symbol_word_t);
-    esp_err_t err = rmt_transmit(ctx->channel, ctx->encoder,
-                                  symbols, payload_bytes, &tx_cfg);
+    err = rmt_transmit(ctx->channel, ctx->encoder,
+                       symbols, payload_bytes, &tx_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rmt_transmit failed: %s", esp_err_to_name(err));
     }
     return err;
 }
 
+/*
+ * Transmit without draining the semaphore — used by pipelined callers
+ * that manage the semaphore count explicitly (double-buffered slewing).
+ * The caller must have drained the semaphore once before the first
+ * pipelined transmit, then rely on wait + transmit ordering thereafter.
+ */
+static esp_err_t transmit_channel_no_drain(rmt_chan_ctx_t *ctx,
+                                            const rmt_symbol_word_t *symbols,
+                                            uint32_t num_symbols)
+{
+    esp_err_t err = ensure_channel_enabled(ctx);
+    if (err != ESP_OK) return err;
+
+    rmt_transmit_config_t tx_cfg = {
+        .loop_count = 0,
+    };
+
+    size_t payload_bytes = num_symbols * sizeof(rmt_symbol_word_t);
+    err = rmt_transmit(ctx->channel, ctx->encoder,
+                       symbols, payload_bytes, &tx_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_transmit failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+/* Standalone transmit — drains semaphore before launching. */
 esp_err_t motors_rmt_transmit_ra(const rmt_symbol_word_t *symbols,
                                   uint32_t num_symbols)
 {
@@ -392,6 +438,19 @@ esp_err_t motors_rmt_transmit_dec(const rmt_symbol_word_t *symbols,
                                    uint32_t num_symbols)
 {
     return transmit_channel(&s_rmt.dec, symbols, num_symbols);
+}
+
+/* Pipelined transmit — no semaphore drain. Caller manages drain once upfront. */
+esp_err_t motors_rmt_transmit_no_drain_ra(const rmt_symbol_word_t *symbols,
+                                           uint32_t num_symbols)
+{
+    return transmit_channel_no_drain(&s_rmt.ra, symbols, num_symbols);
+}
+
+esp_err_t motors_rmt_transmit_no_drain_dec(const rmt_symbol_word_t *symbols,
+                                            uint32_t num_symbols)
+{
+    return transmit_channel_no_drain(&s_rmt.dec, symbols, num_symbols);
 }
 
 /* --------------------------------------------------------------------------
@@ -427,17 +486,34 @@ esp_err_t motors_rmt_wait_dec(TickType_t timeout_ticks)
  * -------------------------------------------------------------------------- */
 
 /*
- * Abort one channel: disable the RMT peripheral (stops DMA immediately),
- * re-enable it for the next transmission, and give the semaphore so any
- * blocked waiter can check motion_active and exit.
+ * Abort one channel — drain the TX queue, reset the channel, and wake
+ * any blocked waiter so it can check s_motion.active and exit.
  *
- * If the channel was never enabled (lazy enable in transmit_channel)
- * there is nothing to disable — skip the hardware call to avoid
- * "channel can't be disabled in state 0" errors.
+ * With double-buffered pipelining the TX queue may hold pending
+ * transmissions whose symbol buffers are stack-allocated in the
+ * slewing loop.  rmt_tx_wait_all_done() drains the queue safely
+ * before rmt_disable() + rmt_enable() reset the hardware.
+ *
+ * The disable/enable reset always runs, even on flush timeout —
+ * otherwise the channel stays in a broken state and every subsequent
+ * transmission also fails.
  */
 static void abort_channel(rmt_chan_ctx_t *ctx)
 {
     if (ctx->channel != NULL && ctx->enabled) {
+        /*
+         * Drain the TX queue — a single batch takes ≤ 20 ms.
+         * With double-buffering and a queue depth of 4, up to
+         * ~80 ms of data may be in flight.  150 ms covers it.
+         */
+        esp_err_t wait_err = rmt_tx_wait_all_done(ctx->channel, 150);
+        if (wait_err != ESP_OK) {
+            ESP_LOGW(TAG, "abort: rmt_tx_wait_all_done timeout (%s) — "
+                     "forcing channel reset",
+                     esp_err_to_name(wait_err));
+        }
+        /* Always reset the hardware — a stuck DMA or FIFO will
+         * poison every future transmission otherwise. */
         rmt_disable(ctx->channel);
         rmt_enable(ctx->channel);
     }

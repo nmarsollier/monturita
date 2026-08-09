@@ -178,7 +178,6 @@ idf_component_register(
         "rest_alpaca/rest_alpaca_utcdate_handler.c"
         "rest_alpaca/rest_alpaca_utcdate_put_handler.c"
 
-        "runtime/runtime_config.c"
         "runtime/runtime_loop.c"
         "runtime/runtime_setup.c"
 

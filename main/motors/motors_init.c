@@ -37,13 +37,6 @@ esp_err_t motors_init(void) {
         return err;
     }
 
-    err = motors_rmt_init();
-    if (err != ESP_OK) {
-        ESP_LOGE("MOTORS_INIT", "motors_rmt_init: %s", esp_err_to_name(err));
-        motors_state.status = MOTORS_STATUS_DISABLED;
-        return err;
-    }
-
     motors_queue_init();
     motors_motion_task_init();
     return ESP_OK;

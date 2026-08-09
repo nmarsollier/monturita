@@ -6,14 +6,17 @@ static TrackingMode s_saved_tracking = TRACKING_NONE;
 
 MountResult mount_set_move_axis_speed(float ra_speed, float dec_speed) {
     if ((int) ra_speed == 0 && (int) dec_speed == 0) {
-        /* Read before mount_stop() — mount_move_axis_reset() clears it. */
-        TrackingMode to_restore = s_saved_tracking;
-        s_saved_tracking = TRACKING_NONE;
-        MountResult r = mount_stop();
-        if (to_restore != TRACKING_NONE) {
-            mount_set_tracking(to_restore);
+        /* Only stop if a MoveAxis is actually running — a stray Rate=0
+         * from the MoveAxis client must not abort a SLEW (goto). */
+        if (motors_is_active_move_axis()) {
+            TrackingMode to_restore = s_saved_tracking;
+            s_saved_tracking = TRACKING_NONE;
+            mount_stop();
+            if (to_restore != TRACKING_NONE) {
+                mount_set_tracking(to_restore);
+            }
         }
-        return r;
+        return mount_result_ok();
     }
 
     MotorsState s = motors_current_state();

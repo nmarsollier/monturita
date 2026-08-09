@@ -23,6 +23,8 @@ void rest_server_start(void) {
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
     config.ctrl_port = 32768;
+    config.core_id = 0;
+    config.task_priority = 4;
 
     esp_err_t result = httpd_start(&server, &config);
     if (result != ESP_OK) {
