@@ -8,8 +8,9 @@ Mantener este archivo en formato simple, para que pueda leerse y editarse rapida
 - Utiliza un modulo Hosyond ESP32-S3 Development Board N16R8 con ESP32-S3-WROOM-1, WiFi y Bluetooth Dual-Mode,
   USB-C (ver seccion "Placa ESP32-S3" abajo para especificaciones completas y pinout)
 - Utiliza 2 TMC2209 de BT https://global.bttwiki.com/TMC2209.html
-- Utiliza 2 motores paso a paso Nema17 con las siguientes caracteristicas: Low Noise:15N.cm(21oz.in) holding torque,
-  drive voltage 12V/ 24V, rated current 1.4A, resistance 3.5ohms
+- Utiliza 2 motores paso a paso Nema17 (Creality CR-10/Ender 3), 1.8° por paso, 4 cables, corriente nominal 1.5A:
+  - RA:  42-48mm, 3.8V (resistencia ~2.5ohm)
+  - DEC: 42-40mm, 3.3V (resistencia ~2.2ohm)
 - Utiliza 2 poleas 20 dientes en el motor, 80 dientes en el eje de rotacion
 - La montura posee 2 botones fisicos, Stop y Home
 - Posee una pantalla minimalista OLED de 0.98 inch, se muestra verticalmente

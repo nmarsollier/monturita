@@ -75,9 +75,16 @@ typedef struct {
     uint8_t     ihold;     /* hold current  (0 – 31) */
 } TmcAxis;
 
+/*
+ * IRUN / IHOLD map to RMS phase current through the TMC2209 internal 0.11 Ω
+ * sense resistors: I_rms = (CS + 1) / 32 × 1.77 A (VSENSE=0).
+ *
+ * Both NEMA 17 motors are rated 1.5 A, so IRUN=19 → 1.11 A (~74 % of rating)
+ * and IHOLD=9 → 0.55 A (half of IRUN), preserving the original run/hold ratio.
+ */
 static const TmcAxis tmc_axes[] = {
-    { .name = "RA",  .address = 0x03, .irun = 15, .ihold = 8 },
-    { .name = "DEC", .address = 0x00, .irun = 15, .ihold = 8 },
+    { .name = "RA",  .address = 0x03, .irun = 19, .ihold = 9 },
+    { .name = "DEC", .address = 0x00, .irun = 19, .ihold = 9 },
 };
 
 /* Forward declaration — defined below. */
