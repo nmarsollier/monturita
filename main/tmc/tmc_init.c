@@ -27,10 +27,33 @@
 /* ── TMC2209 register addresses ────────────────────────────── */
 
 #define TMC_REG_GCONF      0x00
+#define TMC_REG_IFCNT      0x02
 #define TMC_REG_IHOLD_IRUN 0x10
+#define TMC_REG_TPWMTHRS   0x13
 #define TMC_REG_CHOPCONF   0x6C
+#define TMC_REG_DRV_STATUS 0x6F
 
-/* ── Target microstep resolution — see TMC_TARGET_MICROSTEPS in tmc.h ── */
+/* StealthChop→SpreadCycle auto-transition threshold.
+ *
+ * With GCONF.en_SpreadCycle=0 (StealthChop base mode), this selects the
+ * velocity at which the driver switches to SpreadCycle: StealthChop while
+ * TSTEP >= TPWMTHRS (slow = silent), SpreadCycle while TSTEP < TPWMTHRS
+ * (fast = more torque).  This is what makes slow motion silent.
+ *
+ * Threshold: f_STEP = fCLK × µ / (256 × TPWMTHRS).  With fCLK=12 MHz, µ=128
+ * and a 4:1 reduction, TPWMTHRS=10547 → ~569 input steps/s ≈ 2 deg/s. */
+#define TMC_TPWMTHRS_VALUE 10547
+
+/* ── Target microstep resolution — see MICROSTEPS in tmc.h ── */
+
+/* MICROSTEPS must be a valid TMC2209 microstep value; otherwise
+ * tmc_microsteps_to_mres() silently falls through to its default. */
+_Static_assert(MICROSTEPS == 256 || MICROSTEPS == 128 ||
+               MICROSTEPS == 64  || MICROSTEPS == 32  ||
+               MICROSTEPS == 16  || MICROSTEPS == 8   ||
+               MICROSTEPS == 4   || MICROSTEPS == 2   ||
+               MICROSTEPS == 1,
+               "MICROSTEPS must be 256/128/64/32/16/8/4/2/1");
 
 /* Convert the target microstep count to the MRES register field.
  * TMC2209 MRES mapping: 256→0, 128→1, 64→2, 32→3, 16→4, 8→5, 4→6, 2→7, 1→8 */
@@ -265,9 +288,57 @@ static esp_err_t tmc_read_register(uint8_t address, uint8_t reg, uint32_t *value
     return last_err;
 }
 
+/* ── Verified write helpers ─────────────────────────────────── */
+
+/*
+ * Write a register and verify the hardware latched it by reading it back.
+ * Only the bits set in `mask` must match — reserved bits that the hardware
+ * ignores are simply excluded.  Retries on flaky single-wire UART reads.
+ */
+static esp_err_t tmc_write_verified(const TmcAxis *axis, uint8_t reg,
+                                    uint32_t value, uint32_t mask,
+                                    uint32_t *readback)
+{
+    uint32_t rv = 0;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (tmc_write_register(axis->address, reg, value) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        if (tmc_read_register(axis->address, reg, &rv) == ESP_OK
+            && (rv & mask) == (value & mask)) {
+            if (readback != NULL) *readback = rv;
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    if (readback != NULL) *readback = rv;
+    return ESP_FAIL;
+}
+
+/*
+ * Write a write-only register (IHOLD_IRUN, TPWMTHRS) and verify the driver
+ * accepted it: IFCNT increments on every valid write.  Write-only registers
+ * cannot be read back, so IFCNT is the only available proof of acceptance.
+ */
+static esp_err_t tmc_write_only_verified(const TmcAxis *axis, uint8_t reg,
+                                         uint32_t value)
+{
+    uint32_t before = 0, after = 0;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (tmc_read_register(axis->address, TMC_REG_IFCNT, &before) == ESP_OK
+            && tmc_write_register(axis->address, reg, value) == ESP_OK
+            && tmc_read_register(axis->address, TMC_REG_IFCNT, &after) == ESP_OK
+            && ((after - before) & 0xFFu) == 1u) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    return ESP_FAIL;
+}
+
 /* ── Driver init (write + verify) ──────────────────────────── */
 
-static esp_err_t tmc_init_driver(const TmcAxis *axis)
+static esp_err_t tmc_init_driver(const TmcAxis *axis, int axis_index)
 {
     esp_err_t result;
     uint32_t verify = 0;
@@ -275,82 +346,89 @@ static esp_err_t tmc_init_driver(const TmcAxis *axis)
     ESP_LOGI(TAG, "--- Initialising axis %s [Addr: 0x%02X] ---",
              axis->name, axis->address);
 
-    /* ── GCONF: UART microstep control + digital current control ── */
-    uint32_t gconf = 0x000000C0;    /* mstep_reg_select=1, pdn_disable=1, i_scale_analog=0 */
-    result = tmc_write_register(axis->address, TMC_REG_GCONF, gconf);
+    /* ── GCONF: StealthChop base mode, SpreadCycle above TPWMTHRS ──
+     * en_SpreadCycle (bit 2) = 0 selects StealthChop as the base chopper
+     * (silent); TPWMTHRS below flips to SpreadCycle at slew speed.
+     * mstep_reg_select (bit 7) = 1 takes microsteps from CHOPCONF.MRES;
+     * pdn_disable (bit 6) = 1 keeps PDN_UART as a pure UART. */
+    uint32_t gconf = 0x000000C0;
+    uint32_t gconf_mask = (1U << 7) | (1U << 6) | (1U << 2);
+    result = tmc_write_verified(axis, TMC_REG_GCONF, gconf, gconf_mask, &verify);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: UART write failure on GCONF", axis->name);
+        tmc_axis_status[axis_index] = TMC_AXIS_ERROR;
+        tmc_axis_error[axis_index] = TMC_AXIS_ERROR_GCONF_WRITE;
+        ESP_LOGE(TAG, "%s: GCONF write/verify failed (0x%08lX)", axis->name, (unsigned long)verify);
+        return result;
+    }
+    ESP_LOGI(TAG, "%s: GCONF verified — StealthChop base, mstep_reg_select=1 (0x%08lX)",
+             axis->name, (unsigned long)verify);
+
+    /* ── IHOLD_IRUN (write-only) ──
+     * Field layout: IHOLD [4:0], IRUN [12:8], IHOLDDELAY [19:16]. */
+    uint32_t ihold_irun = (uint32_t)axis->ihold        /* IHOLD [4:0] */
+                        | ((uint32_t)axis->irun << 8)  /* IRUN  [12:8] */
+                        | (1U << 16);                  /* IHOLDDELAY = 1 */
+    result = tmc_write_only_verified(axis, TMC_REG_IHOLD_IRUN, ihold_irun);
+    if (result != ESP_OK) {
+        tmc_axis_status[axis_index] = TMC_AXIS_ERROR;
+        tmc_axis_error[axis_index] = TMC_AXIS_ERROR_IHOLD_WRITE;
+        ESP_LOGE(TAG, "%s: IHOLD_IRUN write not accepted", axis->name);
         return result;
     }
 
-    /* Verify GCONF — mstep_reg_select (bit 7) must be set. */
-    result = tmc_read_register(axis->address, TMC_REG_GCONF, &verify);
+    /* ── CHOPCONF (read-write) ── */
+    uint32_t chopconf = (10U << 0)   /* TOFF = 10 */
+                      | (5U << 4)    /* HSTRT = 5 */
+                      | (2U << 7)    /* HEND = 2 */
+                      | (2U << 15)   /* TBL = 2 */
+                      | ((uint32_t)tmc_microsteps_to_mres(MICROSTEPS) << 24) /* MRES */
+                      | (1U << 28);  /* INTPOL → 256 µsteps */
+    uint32_t chopconf_mask = 0x0FU | (0x7U << 4) | (0xFU << 7)
+                           | (0x3U << 15) | (1U << 17)
+                           | (0xFU << 24) | (1U << 28);
+    result = tmc_write_verified(axis, TMC_REG_CHOPCONF, chopconf, chopconf_mask, &verify);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: cannot read back GCONF (%s)",
-                 axis->name, esp_err_to_name(result));
-        return ESP_FAIL;
-    } else if (!(verify & (1U << 7))) {
-        ESP_LOGW(TAG, "%s: GCONF mstep_reg_select NOT latched! (read 0x%08lX, expected bit 7 set)",
-                 axis->name, (unsigned long)verify);
-    } else {
-        ESP_LOGI(TAG, "%s: GCONF verified (0x%08lX, mstep_reg_select=1, i_scale_analog=%lu)",
-                 axis->name, (unsigned long)verify, (unsigned long)(verify & 1U));
-    }
-
-    /* ── IHOLD_IRUN ── */
-    uint32_t ihold_irun = (uint32_t)axis->ihold
-                        | (1U << 8)                    /* IHOLDDELAY */
-                        | ((uint32_t)axis->irun << 16);
-    result = tmc_write_register(axis->address, TMC_REG_IHOLD_IRUN, ihold_irun);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: UART write failure on IHOLD_IRUN", axis->name);
+        tmc_axis_status[axis_index] = TMC_AXIS_ERROR;
+        tmc_axis_error[axis_index] = TMC_AXIS_ERROR_CHOPCONF_VERIFY;
+        ESP_LOGE(TAG, "%s: CHOPCONF write/verify failed (0x%08lX)", axis->name, (unsigned long)verify);
         return result;
     }
 
-    /* ── CHOPCONF ── */
-    uint32_t chopconf = 0x10410153;      /* power-on default */
-    chopconf &= ~(0x0FU << 24);          /* clear MRES */
-    chopconf |=  ((uint32_t)tmc_microsteps_to_mres(TMC_TARGET_MICROSTEPS) << 24);
-    chopconf |=  (1U << 14);             /* SpreadCycle */
-    chopconf |=  (1U << 28);             /* intpol → 256 µsteps */
-
-    result = tmc_write_register(axis->address, TMC_REG_CHOPCONF, chopconf);
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: UART write failure on CHOPCONF", axis->name);
-        return result;
-    }
-
-    /* ── Verify CHOPCONF ── */
     uint16_t verified_msteps = 0;
-    result = tmc_read_register(axis->address, TMC_REG_CHOPCONF, &verify);
+    tmc_mres_to_microsteps((uint8_t)((verify >> 24) & 0x0F), &verified_msteps);
+
+    ESP_LOGI(TAG, "%s: CHOPCONF verified — %u µsteps (0x%08lX)",
+             axis->name, verified_msteps, (unsigned long)verify);
+
+    /* ── TPWMTHRS (write-only): silent↔loud transition point ── */
+    result = tmc_write_only_verified(axis, TMC_REG_TPWMTHRS, TMC_TPWMTHRS_VALUE);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "%s: cannot read back CHOPCONF (%s)",
-                 axis->name, esp_err_to_name(result));
-        return ESP_FAIL;
+        tmc_axis_status[axis_index] = TMC_AXIS_ERROR;
+        tmc_axis_error[axis_index] = TMC_AXIS_ERROR_TPWMTHRS_WRITE;
+        ESP_LOGE(TAG, "%s: TPWMTHRS write not accepted", axis->name);
+        return result;
     }
 
-    uint8_t mres = (uint8_t)((verify >> 24) & 0x0F);
-    bool intpol_ok = (verify & (1U << 28)) != 0;
-    bool spread_ok = (verify & (1U << 14)) != 0;
-
-    if (!tmc_mres_to_microsteps(mres, &verified_msteps)) {
-        ESP_LOGE(TAG, "%s: CHOPCONF readback has invalid MRES=%u (0x%08lX)",
-                 axis->name, mres, (unsigned long)verify);
-        return ESP_FAIL;
+    /* ── DRV_STATUS: confirm the chopper mode ──
+     * bit 30 (stealth): 1 = StealthChop, 0 = SpreadCycle.  At standstill the
+     * driver is below TPWMTHRS → StealthChop is expected. */
+    if (tmc_read_register(axis->address, TMC_REG_DRV_STATUS, &verify) == ESP_OK) {
+        bool stealth = (verify & (1U << 30)) != 0;
+        uint8_t cs_actual = (uint8_t)((verify >> 16) & 0x1F);
+        ESP_LOGI(TAG, "%s: DRV_STATUS=0x%08lX — %s (CS_ACTUAL=%u, IHOLD=%u)",
+                 axis->name, (unsigned long)verify,
+                 stealth ? "StealthChop" : "SpreadCycle", cs_actual, axis->ihold);
+        if (!stealth) {
+            ESP_LOGW(TAG, "%s: StealthChop expected at standstill — check SPREAD pin (HIGH inverts en_SpreadCycle)",
+                     axis->name);
+        }
+    } else {
+        ESP_LOGW(TAG, "%s: DRV_STATUS read failed — chopper mode unknown", axis->name);
     }
 
-    if (verified_msteps != TMC_TARGET_MICROSTEPS) {
-        ESP_LOGE(TAG, "%s: CHOPCONF MRES MISMATCH! wrote=%u µsteps, hardware=%u µsteps (0x%08lX)",
-                 axis->name, TMC_TARGET_MICROSTEPS, verified_msteps, (unsigned long)verify);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "%s: CHOPCONF verified — %u µsteps, intpol=%s, SpreadCycle=%s (0x%08lX)",
-             axis->name, verified_msteps,
-             intpol_ok ? "ON" : "OFF",
-             spread_ok ? "ON" : "OFF",
-             (unsigned long)verify);
-    tmc2209_set_active_microsteps(verified_msteps);
+    tmc_axis_status[axis_index] = TMC_AXIS_OK;
+    tmc_axis_error[axis_index] = TMC_AXIS_ERROR_NONE;
+    tmc2209_set_initialized(true);
 
     ESP_LOGI(TAG, "%s: init complete (µsteps=%u, irun=%u, ihold=%u)",
              axis->name, verified_msteps, axis->irun, axis->ihold);
@@ -361,6 +439,12 @@ static esp_err_t tmc_init_driver(const TmcAxis *axis)
 
 esp_err_t tmc2209_hw_init(void)
 {
+    /* Reset per-axis diagnostics before (re)initialising. */
+    for (int i = 0; i < TMC_AXIS_COUNT; i++) {
+        tmc_axis_status[i] = TMC_AXIS_NOT_INIT;
+        tmc_axis_error[i] = TMC_AXIS_ERROR_NONE;
+    }
+
     uart_config_t config = {
         .baud_rate  = TMC_BAUD_RATE,
         .data_bits  = UART_DATA_8_BITS,
@@ -370,16 +454,38 @@ esp_err_t tmc2209_hw_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
+    /* Single shared UART bus — a setup failure affects every axis. */
     esp_err_t result = uart_driver_install(TMC_UART_NUM, 512, 512, 0, NULL, 0);
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        for (int i = 0; i < TMC_AXIS_COUNT; i++) {
+            tmc_axis_status[i] = TMC_AXIS_ERROR;
+            tmc_axis_error[i] = TMC_AXIS_ERROR_UART;
+        }
+        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(result));
+        return result;
+    }
 
     result = uart_param_config(TMC_UART_NUM, &config);
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        for (int i = 0; i < TMC_AXIS_COUNT; i++) {
+            tmc_axis_status[i] = TMC_AXIS_ERROR;
+            tmc_axis_error[i] = TMC_AXIS_ERROR_UART;
+        }
+        ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(result));
+        return result;
+    }
 
     result = uart_set_pin(TMC_UART_NUM,
                           ESP_UART_TX_GPIO, ESP_UART_RX_GPIO,
                           UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        for (int i = 0; i < TMC_AXIS_COUNT; i++) {
+            tmc_axis_status[i] = TMC_AXIS_ERROR;
+            tmc_axis_error[i] = TMC_AXIS_ERROR_UART;
+        }
+        ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(result));
+        return result;
+    }
 
     gpio_set_pull_mode(ESP_UART_RX_GPIO, GPIO_PULLUP_ONLY);
 
@@ -391,7 +497,7 @@ esp_err_t tmc2209_hw_init(void)
 
     bool all_ok = true;
     for (size_t i = 0; i < sizeof(tmc_axes) / sizeof(tmc_axes[0]); i++) {
-        result = tmc_init_driver(&tmc_axes[i]);
+        result = tmc_init_driver(&tmc_axes[i], (int)i);
         if (result != ESP_OK) {
             ESP_LOGE(TAG, "Error initialising axis %s", tmc_axes[i].name);
             all_ok = false;
@@ -400,8 +506,8 @@ esp_err_t tmc2209_hw_init(void)
     }
 
     if (!all_ok) {
-        tmc2209_set_active_microsteps(0);
         ESP_LOGE(TAG, "One or more TMC2209 axes failed to initialise — mount inoperable");
+        tmc2209_set_initialized(false);
         return ESP_FAIL;
     }
 

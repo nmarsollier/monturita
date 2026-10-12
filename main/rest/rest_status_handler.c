@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "mount.h"
+#include "tmc/tmc.h"
 
 #include "utils/utils.h"
 #include "wifi/wifi.h"
@@ -51,7 +52,15 @@ esp_err_t rest_status_handler(httpd_req_t *request) {
             "\"elevation\":%d"
             "},"
             "\"wifi_ap\":%s,"
-            "\"is_home\":%s"
+            "\"is_home\":%s,"
+            "\"debug\":{"
+            "\"tmc_ok\":%s,"
+            "\"tmc_ra\":\"%s\","
+            "\"tmc_dec\":\"%s\","
+            "\"tmc_ra_error\":\"%s\","
+            "\"tmc_dec_error\":\"%s\","
+            "\"microsteps\":%u"
+            "}"
             "}";
 
     const char *status = motors_status_to_string(data.status);
@@ -62,7 +71,7 @@ esp_err_t rest_status_handler(httpd_req_t *request) {
     /*
      * Fixed-size buffer — the JSON response with LST + pier_side fits in 640 bytes.
      */
-    char response[640];
+    char response[1024];
     snprintf(response, sizeof(response), format,
              status, tracking,
              data.ra.hours, data.ra.minutes, data.ra.seconds,
@@ -72,7 +81,13 @@ esp_err_t rest_status_handler(httpd_req_t *request) {
              time_buf,
              data.settings.lat, data.settings.lon, data.settings.elevation,
              wifi_ap ? "true" : "false",
-             is_home ? "true" : "false");
+             is_home ? "true" : "false",
+             tmc2209_is_initialized() ? "true" : "false",
+             tmc2209_axis_status_to_string(tmc2209_get_axis_status(TMC_AXIS_RA)),
+             tmc2209_axis_status_to_string(tmc2209_get_axis_status(TMC_AXIS_DEC)),
+             tmc2209_axis_error_to_string(tmc2209_get_axis_error(TMC_AXIS_RA)),
+             tmc2209_axis_error_to_string(tmc2209_get_axis_error(TMC_AXIS_DEC)),
+             MICROSTEPS);
 
     http_response_json(request, response);
 
