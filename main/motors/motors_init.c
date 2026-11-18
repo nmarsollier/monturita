@@ -4,6 +4,7 @@
  */
 #include "motors.h"
 #include "motors_internal.h"
+#include "tmc.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
@@ -19,25 +20,51 @@ MotorsState motors_state = {
     .tracking = TRACKING_NONE,
     .ra_speed = 0.0f,
     .dec_speed = 0.0f,
-    .limits = {
-        .ra_min = -100.0f,
-        .ra_max = 100.0f,
-        .dec_min = -150.0f,
-        .dec_max = 150.0f,
-    },
 };
+
+/*
+ * Spinlock guarding the int64_t position counters (ra_steps / dec_steps)
+ * against torn reads from other cores.  On a 32-bit target an int64_t
+ * access is two 32-bit accesses, so readers/writers must serialize.
+ */
+portMUX_TYPE motors_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 esp_err_t motors_init(void) {
     esp_err_t err;
 
+    /* Load persisted axis limits (or factory defaults on first boot). */
+    motors_limits_load();
+
     err = motors_hw_init();
     if (err != ESP_OK) {
         ESP_LOGE("MOTORS_INIT", "motors_hw_init: %s", esp_err_to_name(err));
-        motors_state.status = MOTORS_STATUS_DISABLED;
+        motors_enter_hardware_fault();
         return err;
     }
 
-    motors_queue_init();
-    motors_motion_task_init();
+    err = motors_queue_init();
+    if (err != ESP_OK) {
+        ESP_LOGE("MOTORS_INIT", "motors_queue_init failed: %s", esp_err_to_name(err));
+        motors_enter_hardware_fault();
+        return err;
+    }
+
+    err = motors_motion_task_init();
+    if (err != ESP_OK) {
+        ESP_LOGE("MOTORS_INIT", "motors_motion_task_init failed: %s", esp_err_to_name(err));
+        motors_enter_hardware_fault();
+        return err;
+    }
+
+    /* The TMC2209s must have been configured (tmc2209_hw_init) before this
+     * point.  If they did not initialise, they may be unpowered (no 12 V) or
+     * faulty — treat it as a recoverable power fault: the periodic probe
+     * re-initialises them once they start answering again. */
+    if (!tmc2209_is_initialized()) {
+        ESP_LOGW("MOTORS_INIT", "TMC2209 not initialised — will re-init when it responds");
+        motors_enter_error_state();
+        motors_mark_power_fault();
+    }
+
     return ESP_OK;
 }

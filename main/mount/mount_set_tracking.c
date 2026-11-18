@@ -14,14 +14,13 @@
  * apparent motion during observations while respecting state rules.
  */
 MountResult mount_set_tracking(TrackingMode tracking) {
+    if (mount_is_error()) {
+        return mount_result_error_state();
+    }
+
     MotorResultCode rc = motors_start_tracking(tracking);
     if (rc != MOTOR_OK) {
-        switch (rc) {
-            case MOTOR_ERR_NOT_READY:
-                return mount_result_error("Motors not ready");
-            default:
-                return mount_result_error("Motor error");
-        }
+        return motors_result_code_error_result(rc);
     }
 
     return mount_result_ok();

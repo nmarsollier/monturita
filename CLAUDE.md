@@ -145,22 +145,20 @@ G21  ← HOME button
 Capas del sistema, de afuera hacia adentro:
 
 ```
-Cliente Web (Alpine.js) → REST API → Mount (orquestacion) → Motors → TMC2209 (hardware)
+mount_panel (Go) ──USB CDC-ACM──▶ Proto ──▶ Mount (orquestacion) ──▶ Motors ──▶ TMC2209 (hardware)
 ```
 
-- **www/** — UI Web embebida programada con Alpine.js. Compila con `node www/build.js`, genera `www/dist/`.
-- **REST API** (`main/rest/`) — Expone endpoints HTTP para control de la montura.
-- **Mount** (`main/mount/`) — Orquestacion logica del montaje: estado, coordenadas, sincronizacion.
+- **Proto** (`main/proto/`) — Protocolo serial length-prefixed JSON sobre USB CDC-ACM. Seis familias: `capabilities`, `state`, `config`, `control`, `action`, `query`.
+- **USB CDC** (`main/usb_cdc/`) — Transporte USB CDC-ACM (TinyUSB). Un unico puerto serial.
+- **Mount** (`main/mount/`) — Orquestacion logica del montaje: estado, coordenadas, meridian flip, sincronizacion.
+- **Motors** (`main/motors/`) — Control de motores de alto nivel + ejecucion hardware (pulsos STEP/DIR via RMT+DMA).
+- **TMC** (`main/tmc/`) — Driver TMC2209 via UART (bus unico compartido, direccionamiento MS1/MS2). Configuracion de microsteps, corrientes y chopper.
+- **LED** (`main/led/`) — Control PWM del LED externo en GPIO 4. Estados: tenue (normal), brillante (slewing), beacon (error).
 - **Runtime** (`main/runtime/`) — Inicializacion y ciclo de vida del sistema.
-- **Motors** (`main/motors/`) — Control de motores de alto nivel.
-- **Motors Motion** (`main/motors_motion/`) — Ejecucion hardware: generacion de pulsos STEP/DIR.
-- **TMC** (`main/tmc/`) — Driver TMC2209 via UART. Unica fuente de verdad para configuracion de microsteps.
-- **LED** (`main/led/`) — Control PWM del LED externo en GPIO 4. Estados: tenue (normal), brillante (slewing), respiracion (error).
-- **Network** (`main/network/`) — Conectividad WiFi.
-- **USB Net** (`main/usb_net/`) — Interfaz de red USB Ethernet via TinyUSB en modo ECM/RNDIS. Permite conectar
-  la montura a una computadora por USB-C y acceder a la API REST y Alpaca sin WiFi. IP estatica del ESP32-S3:
-  192.168.7.1, DHCP server para el host.
-- **Tools** (`main/tools/`) — Utilidades transversales (parser, validacion).
+- **Config** (`main/config/config.h`) — Unica fuente de verdad de los parametros de hardware (pines, resolucion, reduccion, corrientes).
+- **Utils** (`main/utils/`) — Utilidades transversales.
+
+La referencia tecnica del driver TMC2209 vive en `TMC.md` (independiente de plataforma y placa).
 
 ## Reglas generales
 
@@ -198,6 +196,8 @@ Cliente Web (Alpine.js) → REST API → Mount (orquestacion) → Motors → TMC
 
 ## Relaciones entre modulos (dependencias)
 
-- Network es autocontenido y expone WiFi STA + AP fallback
-- USB Net depende de TinyUSB (componente gestionado `espressif/esp_tinyusb`) y esp_netif
-- REST API y Alpaca se enlazan a INADDR_ANY, accesibles tanto por WiFi como por USB Net
+- USB CDC es autocontenido y expone el transporte serial (componente gestionado `espressif/esp_tinyusb`, clase CDC-ACM)
+- Proto depende de USB CDC (framing) y de Mount/Motors (handlers)
+- Mount depende de Motors; Motors depende de TMC (microsteps) y de Config
+- Config es compartido por todos los modulos como unica fuente de verdad de hardware
+- El mount_panel (app Go, repo aparte) es el unico cliente y traduce el protocolo a Alpaca/UI

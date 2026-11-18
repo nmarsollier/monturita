@@ -1,72 +1,112 @@
 /*
- * tmc.h — TMC2209 driver public API.
+ * tmc.h — TMC2209 driver public API (two axes: RA and DEC).
  *
- * This module is the SINGLE source of truth for microstep configuration.
- * All other layers MUST reference MICROSTEPS rather than
- * defining their own constants.
+ * The microstep configuration (MOTORS_MICROSTEPS_TRACKING) and the per-axis
+ * coil currents (TMC_*_IRUN / TMC_*_IHOLD) live in config.h.
  */
 
 #pragma once
 
-#include "esp_err.h"
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-/* --------------------------------------------------------------------------
- * Microstep configuration — single source of truth for the entire system.
- *
- * All other layers (motors, motion) MUST reference this value rather than
- * defining their own constants.
- * -------------------------------------------------------------------------- */
-#define MICROSTEPS  128
+#include "esp_err.h"
 
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
 
 /*
- * Initialize UART, configure GCONF/IHOLD_IRUN/CHOPCONF on both RA and DEC
- * axes, and verify that the hardware latched the requested microsteps.
+ * Initialize the single-wire UART, configure GCONF/IHOLD_IRUN/CHOPCONF/
+ * PWMCONF on both drivers and verify that each latched the requested
+ * microsteps.
  *
+ * The drivers share one UART bus and are addressed by their MS1/MS2 pins.
  * Must be called before any step/direction motion is started.
- * Called internally from motors_hw_init().
  */
 esp_err_t tmc2209_hw_init(void);
 
 /*
- * Query whether the TMC2209 UART and both axes were initialised
- * successfully.  Used for error-state LED signalling.
+ * Probe both drivers over UART: return true only when both answer a register
+ * read.  This doubles as the "TMC working" sense — the drivers are fed by VM
+ * (12 V), so they are silent when the rail is absent and their logic supply
+ * collapses.  Both motors must be alive for the mount to move.
+ */
+bool tmc2209_probe(void);
+
+/*
+ * Re-configure the driver registers after they stop answering and then answer
+ * again (power returned): their registers were lost while unpowered, so they
+ * are rewritten.  Does not re-install the UART.
+ */
+esp_err_t tmc2209_reinit(void);
+
+/*
+ * Change the microstep resolution on both drivers at runtime: read-modify-write
+ * of CHOPCONF.MRES (preserving the other fields), verified by read-back with
+ * retries.  Returns ESP_OK only when BOTH drivers latched the requested value.
+ * Must be called with the mount otherwise idle (no STEP stream in flight).
+ */
+esp_err_t tmc2209_set_microsteps(uint16_t microsteps);
+
+/*
+ * Current active microstep resolution on both drivers.  The value is only ever
+ * recorded after a verified read-back, so it is always the real one — the motors
+ * layer trusts it for step accounting and status reporting.
+ */
+uint16_t tmc2209_get_microsteps(void);
+
+/* Chopper mode selected per motion strategy (see motors_microsteps.c). */
+typedef enum {
+    TMC_CHOP_STEALTH = 0,   /* silent PWM control — tracking, guiding, gentle slews */
+    TMC_CHOP_SPREAD,        /* SpreadCycle chopper — coarse slews */
+} TmcChopMode;
+
+/*
+ * Change the chopper mode on both drivers at runtime: read-modify-write of
+ * GCONF.en_SpreadCycle (accounting for the SPREAD pin inversion), verified by
+ * read-back with retries.  Returns ESP_OK only when BOTH drivers latched the
+ * requested mode.  Must be called with the mount otherwise idle (no STEP stream).
+ */
+esp_err_t tmc2209_set_chop_mode(TmcChopMode mode);
+
+/*
+ * Current active chopper mode on both drivers.  The value is only ever recorded
+ * after a verified read-back, so it is always the real one.
+ */
+TmcChopMode tmc2209_get_chop_mode(void);
+
+/*
+ * Query whether both TMC2209 UARTs and drivers were initialised successfully.
+ * Used for error-state LED signalling.
  */
 bool tmc2209_is_initialized(void);
 
 /* --------------------------------------------------------------------------
- * Per-axis init diagnostics — exposed so the UI can report which axis
- * failed and why (UART vs register config).
+ * Init diagnostics — status and failure reason.
  * -------------------------------------------------------------------------- */
 
-#define TMC_AXIS_RA    0
-#define TMC_AXIS_DEC   1
-#define TMC_AXIS_COUNT 2
-
-/* Per-axis init status. */
+/* Init status. */
 typedef enum {
-    TMC_AXIS_NOT_INIT = 0,   /* init not run / not reached */
-    TMC_AXIS_OK,             /* configured and verified */
-    TMC_AXIS_ERROR,          /* failed — see tmc2209_get_axis_error() */
-} TmcAxisStatus;
+    TMC_NOT_INIT = 0,   /* init not run / not reached */
+    TMC_OK,             /* configured and verified */
+    TMC_ERROR,          /* failed — see tmc2209_get_error() */
+} TmcStatus;
 
-/* Per-axis failure reason (valid when status == TMC_AXIS_ERROR). */
+/* Failure reason (valid when status == TMC_ERROR). */
 typedef enum {
-    TMC_AXIS_ERROR_NONE = 0,
-    TMC_AXIS_ERROR_UART,           /* uart_driver_install / param_config / set_pin */
-    TMC_AXIS_ERROR_GCONF_WRITE,    /* GCONF write + readback */
-    TMC_AXIS_ERROR_IHOLD_WRITE,    /* IHOLD_IRUN write (IFCNT verify) */
-    TMC_AXIS_ERROR_CHOPCONF_VERIFY,/* CHOPCONF write + readback / MRES mismatch */
-    TMC_AXIS_ERROR_TPWMTHRS_WRITE  /* TPWMTHRS write (IFCNT verify) */
-} TmcAxisError;
+    TMC_ERROR_NONE = 0,
+    TMC_ERROR_UART,            /* uart_driver_install / param_config / set_pin */
+    TMC_ERROR_GCONF_WRITE,     /* GCONF write + readback */
+    TMC_ERROR_IHOLD_WRITE,     /* IHOLD_IRUN write */
+    TMC_ERROR_CHOPCONF_VERIFY, /* CHOPCONF write + readback / MRES mismatch */
+    TMC_ERROR_PWMCONF_VERIFY,  /* PWMCONF write + readback */
+    TMC_ERROR_MRES_SET,        /* runtime microstep switch: CHOPCONF.MRES write + readback */
+    TMC_ERROR_CHOP_MODE_SET    /* runtime chop mode switch: GCONF.en_SpreadCycle write + readback */
+} TmcError;
 
-TmcAxisStatus tmc2209_get_axis_status(int axis);
-TmcAxisError  tmc2209_get_axis_error(int axis);
+TmcStatus tmc2209_get_status(void);
+TmcError  tmc2209_get_error(void);
 
-const char *tmc2209_axis_status_to_string(TmcAxisStatus status);
-const char *tmc2209_axis_error_to_string(TmcAxisError error);
+const char *tmc2209_status_to_string(TmcStatus status);
+const char *tmc2209_error_to_string(TmcError error);

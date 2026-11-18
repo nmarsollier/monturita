@@ -15,21 +15,29 @@ const char *motors_status_to_string(MotorsStatus status) {
     switch (status) {
         case MOTORS_STATUS_READY:
             return "ready";
-        case MOTORS_STATUS_TRACKING:
-            return "tracking";
-        case MOTORS_STATUS_DISABLED:
-            return "disabled";
         case MOTORS_STATUS_SLEWING:
             return "slewing";
+        case MOTORS_STATUS_TRACKING:
+            return "tracking";
         case MOTORS_STATUS_PARKED:
             return "parked";
+        case MOTORS_STATUS_ERROR:
+            return "error";
         default:
-            return "disabled";
+            return "error";
     }
 }
 
+bool motors_status_is_error(MotorsStatus status) {
+    return status == MOTORS_STATUS_ERROR;
+}
+
+bool motors_status_is_parked(MotorsStatus status) {
+    return status == MOTORS_STATUS_PARKED;
+}
+
 /*
- * Tracking string helpers live here so REST and UI layers use the same
+ * Tracking string helpers live here so the protocol and UI layers use the same
  * canonical values as the motors module.
  */
 const char *motors_tracking_to_string(TrackingMode tracking) {

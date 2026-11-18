@@ -2,8 +2,9 @@
  *
  * Purpose: RMT + DMA step pulse generation for RA and DEC axes.
  *
- * Two independent RMT TX channels with GDMA streaming eliminate
- * software jitter and free the CPU during step bursts.
+ * Two independent RMT TX channels.  Only RA uses GDMA streaming; DEC is
+ * refilled from its FIFO by the motion task.  The pulse *shape* is
+ * hardware-timed; the pulse *start* still depends on the scheduler.
  * Step pulses are 2 us HIGH followed by (period - 2) us LOW.
  *
  * RMT resolution: 2 MHz (0.5 us per tick).  Balanced for future
@@ -38,6 +39,9 @@ typedef struct {
     rmt_channel_handle_t channel;
     rmt_encoder_handle_t encoder;
     SemaphoreHandle_t done_sem;
+    gpio_num_t gpio;                 /* retained for channel recreation */
+    rmt_tx_done_callback_t on_done;  /* retained for channel recreation */
+    bool with_dma;                   /* retained for channel recreation */
     bool enabled;
 } rmt_chan_ctx_t;
 
@@ -99,6 +103,12 @@ static esp_err_t create_channel(gpio_num_t gpio, rmt_chan_ctx_t *ctx,
                                  rmt_tx_done_callback_t on_done,
                                  bool with_dma)
 {
+    /* Retain the configuration so recreate_channel() can rebuild the
+     * channel identically after a stop. */
+    ctx->gpio = gpio;
+    ctx->on_done = on_done;
+    ctx->with_dma = with_dma;
+
     rmt_tx_channel_config_t tx_config = {
         .gpio_num = gpio,
         .clk_src = RMT_CLK_SRC_DEFAULT,
@@ -137,9 +147,17 @@ static esp_err_t create_channel(gpio_num_t gpio, rmt_chan_ctx_t *ctx,
         return err;
     }
 
-    ctx->done_sem = xSemaphoreCreateBinary();
+    /*
+     * Counting semaphore (not binary).  The double-buffered slew loop keeps up
+     * to two transactions in flight per axis.  When one axis runs slower than
+     * the other (e.g. RA still accelerating while DEC cruises), both of the
+     * faster axis's batches can complete before the loop's next wait, and a
+     * binary semaphore drops the second completion.  That lost token makes the
+     * loop block until the 500 ms wait times out and aborts the whole motion.
+     */
+    ctx->done_sem = xSemaphoreCreateCounting(RMT_TRANS_QUEUE_DEPTH, 0);
     if (ctx->done_sem == NULL) {
-        ESP_LOGE(TAG, "xSemaphoreCreateBinary GPIO %d failed", gpio);
+        ESP_LOGE(TAG, "xSemaphoreCreateCounting GPIO %d failed", gpio);
         rmt_del_encoder(ctx->encoder);
         ctx->encoder = NULL;
         rmt_del_channel(ctx->channel);
@@ -147,7 +165,6 @@ static esp_err_t create_channel(gpio_num_t gpio, rmt_chan_ctx_t *ctx,
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Channel ready: GPIO %d", gpio);
     return ESP_OK;
 }
 
@@ -178,8 +195,7 @@ esp_err_t motors_rmt_init(void)
     }
 
     s_rmt.initialized = true;
-    ESP_LOGI(TAG, "RMT+DMA step generation ready (RA GPIO %d, DEC GPIO %d)",
-             RA_STEP_GPIO, DEC_STEP_GPIO);
+
     return ESP_OK;
 }
 
@@ -190,7 +206,9 @@ static esp_err_t motors_rmt_deinit(void)
         s_rmt.ra.encoder = NULL;
     }
     if (s_rmt.ra.channel != NULL) {
-        rmt_disable(s_rmt.ra.channel);
+        if (s_rmt.ra.enabled) {
+            rmt_disable(s_rmt.ra.channel);
+        }
         rmt_del_channel(s_rmt.ra.channel);
         s_rmt.ra.channel = NULL;
     }
@@ -204,7 +222,9 @@ static esp_err_t motors_rmt_deinit(void)
         s_rmt.dec.encoder = NULL;
     }
     if (s_rmt.dec.channel != NULL) {
-        rmt_disable(s_rmt.dec.channel);
+        if (s_rmt.dec.enabled) {
+            rmt_disable(s_rmt.dec.channel);
+        }
         rmt_del_channel(s_rmt.dec.channel);
         s_rmt.dec.channel = NULL;
     }
@@ -369,7 +389,7 @@ static esp_err_t ensure_channel_enabled(rmt_chan_ctx_t *ctx)
 static void drain_channel(rmt_chan_ctx_t *ctx)
 {
     if (ctx->done_sem != NULL) {
-        xSemaphoreTake(ctx->done_sem, 0);
+        while (xSemaphoreTake(ctx->done_sem, 0) == pdTRUE) { }
     }
 }
 
@@ -481,64 +501,83 @@ esp_err_t motors_rmt_wait_dec(TickType_t timeout_ticks)
     return ESP_ERR_TIMEOUT;
 }
 
+/*
+ * Non-blocking completion poll — returns true if the channel's latest
+ * transmission has completed (and consumes the done flag).  Used by the
+ * decoupled slewing loop to advance each axis independently, so a slow
+ * axis never stalls a fast one.  "Not done yet" is the normal case here,
+ * so it deliberately does not log.
+ */
+bool motors_rmt_try_wait_ra(void)
+{
+    return s_rmt.ra.done_sem != NULL
+           && xSemaphoreTake(s_rmt.ra.done_sem, 0) == pdTRUE;
+}
+
+bool motors_rmt_try_wait_dec(void)
+{
+    return s_rmt.dec.done_sem != NULL
+           && xSemaphoreTake(s_rmt.dec.done_sem, 0) == pdTRUE;
+}
+
 /* --------------------------------------------------------------------------
- * Abort — stop DMA and wake blocked task
+ * Recreate — tear down and rebuild a channel (motion task only)
  * -------------------------------------------------------------------------- */
 
 /*
- * Abort one channel — drain the TX queue, reset the channel, and wake
- * any blocked waiter so it can check s_motion.active and exit.
+ * Recreate one channel — tear it down and rebuild it from scratch.  Called
+ * ONLY from the motion task (the sole owner of the RMT channel): touching
+ * the RMT hardware from another task races with rmt_transmit() and can
+ * crash the driver.
  *
- * With double-buffered pipelining the TX queue may hold pending
- * transmissions whose symbol buffers are stack-allocated in the
- * slewing loop.  rmt_tx_wait_all_done() drains the queue safely
- * before rmt_disable() + rmt_enable() reset the hardware.
- *
- * The disable/enable reset always runs, even on flush timeout —
- * otherwise the channel stays in a broken state and every subsequent
- * transmission also fails.
+ * rmt_disable() aborts the in-flight transaction but leaves a queued
+ * transaction in the driver's internal PROGRESS queue; a later rmt_enable()
+ * dequeues it and starts it again, reading a payload buffer whose lifetime
+ * ended when the motion loop returned.  Deleting the channel frees those
+ * queued descriptors, so recreation is the only way to guarantee a clean
+ * stop — no resurrected pulses, no use-after-return.
  */
-static void abort_channel(rmt_chan_ctx_t *ctx)
+static esp_err_t recreate_channel(rmt_chan_ctx_t *ctx)
 {
     if (ctx->channel != NULL && ctx->enabled) {
-        /*
-         * Drain the TX queue — a single batch takes ≤ 20 ms.
-         * With double-buffering and a queue depth of 4, up to
-         * ~80 ms of data may be in flight.  150 ms covers it.
-         */
-        esp_err_t wait_err = rmt_tx_wait_all_done(ctx->channel, 150);
-        if (wait_err != ESP_OK) {
-            ESP_LOGW(TAG, "abort: rmt_tx_wait_all_done timeout (%s) — "
-                     "forcing channel reset",
-                     esp_err_to_name(wait_err));
+        /* Wait for the in-flight DMA transfer(s) to complete before touching
+         * the encoder or channel.  Tearing down a channel whose DMA is still
+         * streaming is a use-after-free: the TX-done ISR (or a queued
+         * transaction) fires into freed memory and panics with an
+         * InstructionFetchError. */
+        rmt_tx_wait_all_done(ctx->channel, 100);
+    }
+    if (ctx->encoder != NULL) {
+        rmt_del_encoder(ctx->encoder);
+        ctx->encoder = NULL;
+    }
+    if (ctx->channel != NULL) {
+        /* Only disable an ENABLED channel.  Disabling a channel that was never
+         * enabled (a zero-distance move, or an axis idle during a single-axis
+         * slew) puts the RMT driver in an unexpected state ("channel can't be
+         * disabled in state 0") and can corrupt it. */
+        if (ctx->enabled) {
+            rmt_disable(ctx->channel);
         }
-        /* Always reset the hardware — a stuck DMA or FIFO will
-         * poison every future transmission otherwise. */
-        rmt_disable(ctx->channel);
-        rmt_enable(ctx->channel);
+        rmt_del_channel(ctx->channel);
+        ctx->channel = NULL;
     }
-    /*
-     * Give the semaphore regardless of whether a transmission was in
-     * flight — a binary semaphore silently saturates at count = 1,
-     * so a double-give (ISR already fired + this explicit give) is safe.
-     */
     if (ctx->done_sem != NULL) {
-        xSemaphoreGive(ctx->done_sem);
+        vSemaphoreDelete(ctx->done_sem);
+        ctx->done_sem = NULL;
     }
+    ctx->enabled = false;
+
+    return create_channel(ctx->gpio, ctx, ctx->on_done, ctx->with_dma);
 }
 
-void motors_rmt_abort_ra(void)
+/* Recreate both channels — motion task only. */
+void motors_rmt_reset_both(void)
 {
-    abort_channel(&s_rmt.ra);
-}
-
-void motors_rmt_abort_dec(void)
-{
-    abort_channel(&s_rmt.dec);
-}
-
-void motors_rmt_abort_both(void)
-{
-    abort_channel(&s_rmt.ra);
-    abort_channel(&s_rmt.dec);
+    if (recreate_channel(&s_rmt.ra) != ESP_OK) {
+        ESP_LOGE(TAG, "RA channel recreate failed");
+    }
+    if (recreate_channel(&s_rmt.dec) != ESP_OK) {
+        ESP_LOGE(TAG, "DEC channel recreate failed");
+    }
 }

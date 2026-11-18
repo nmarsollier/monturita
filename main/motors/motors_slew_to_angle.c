@@ -23,16 +23,19 @@ static const char *TAG = "MOTORS_SLEW_TO_ANGLE";
  * Parameters:
  *   ra_deg   — target RA axis angle in degrees (validated against limits)
  *   dec_deg  — target DEC axis angle in degrees
- *   speed_rate — slew profile (1=2°/s, 2=8°/s, 3=16°/s, default=max)
+ *   speed_rate — slew profile (1=1°/s, 2=3°/s, 3=4.5°/s, default=6°/s)
  */
 MotorResultCode motors_slew_to_angle(float ra_deg, float dec_deg, int speed_rate) {
-    TrackingMode currTracking = TRACKING_NONE;
-    if (motors_state.status == MOTORS_STATUS_TRACKING
-        && motors_state.tracking != TRACKING_NONE) {
-        currTracking = motors_state.tracking;
-        motors_stop();
+    if (motors_status_is_error(motors_state.status)) {
+        return MOTOR_ERR_HARDWARE_ERROR;
     }
 
+    if (motors_status_is_parked(motors_state.status)) {
+        return MOTOR_ERR_PARKED;
+    }
+
+    /* Validate targets BEFORE pausing tracking: a rejected slew must not leave
+     * tracking paused. */
     if (!motors_is_valid_ra(ra_deg)) {
         ESP_LOGW(TAG, "Rejected slew: RA out of range (%.3f)", ra_deg);
         return MOTOR_ERR_OUT_OF_RANGE;
@@ -43,10 +46,17 @@ MotorResultCode motors_slew_to_angle(float ra_deg, float dec_deg, int speed_rate
         return MOTOR_ERR_OUT_OF_RANGE;
     }
 
-    float speed = motors_get_slewing_speed(speed_rate);
+    TrackingMode currTracking = TRACKING_NONE;
+    if (motors_state.status == MOTORS_STATUS_TRACKING
+        && motors_state.tracking != TRACKING_NONE) {
+        currTracking = motors_state.tracking;
+        MotorResultCode stop_rc = motors_stop();
+        if (stop_rc != MOTOR_OK) {
+            return stop_rc;
+        }
+    }
 
-    motors_state.ra_speed = speed;
-    motors_state.dec_speed = speed;
+    float speed = motors_get_slewing_speed(speed_rate);
 
     MotionCommand cmd = {
         .type = MOTION_CMD_SLEW,
@@ -54,11 +64,13 @@ MotorResultCode motors_slew_to_angle(float ra_deg, float dec_deg, int speed_rate
         .dec_target_deg = dec_deg,
         .ra_speed = speed,
         .dec_speed = speed,
+        /* Restore tracking as part of the slew itself: the motion task resumes
+         * it inline on completion, so a full queue or a concurrent stop cannot
+         * leave the mount stopped after an accepted goto. */
+        .resume_tracking = currTracking,
     };
-    motors_queue_put(&cmd);
-
-    if (currTracking != TRACKING_NONE) {
-        motors_start_tracking(currTracking);
+    if (!motors_queue_put(&cmd)) {
+        return MOTOR_ERR_BUSY;
     }
 
     return MOTOR_OK;

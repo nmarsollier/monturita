@@ -6,18 +6,80 @@
 
 #pragma once
 
-#include "tmc.h"
+#include <stdbool.h>
 #include <stdint.h>
 
-/*
- * Mark the module initialised after both axes were configured and verified.
- * Called by tmc_init.c: tmc_init_driver() on success, tmc2209_hw_init() on failure.
- */
-void tmc2209_set_initialized(bool initialized);
+#include "tmc.h"
+#include "config.h"
 
-/*
- * Per-axis init diagnostics — written by tmc_init.c as each driver is
- * configured.  Read by tmc_get_axis_status.c for the public getters.
- */
-extern TmcAxisStatus tmc_axis_status[TMC_AXIS_COUNT];
-extern TmcAxisError  tmc_axis_error[TMC_AXIS_COUNT];
+#include "driver/gpio.h"
+#include "driver/uart.h"
+
+/* ── Transport constants ───────────────────────────────────── */
+
+#define TMC_BAUD_RATE    115200
+
+/* ── TMC2209 register addresses ────────────────────────────── */
+
+#define TMC_REG_GCONF      0x00
+#define TMC_REG_IFCNT      0x02
+#define TMC_REG_IOIN       0x06
+#define TMC_REG_IHOLD_IRUN 0x10
+#define TMC_REG_CHOPCONF   0x6C
+#define TMC_REG_DRV_STATUS 0x6F
+#define TMC_REG_PWMCONF    0x70
+
+/* ── Per-axis table (tmc_uart.c) ───────────────────────────── */
+
+typedef struct {
+    const char *name;
+    uint8_t     address;   /* UART address (MS1/MS2 pins) */
+    uint8_t     irun;      /* run current (0–31) */
+    uint8_t     ihold;     /* hold current (0–31) */
+} TmcAxis;
+
+#define TMC_AXIS_COUNT 2
+extern const TmcAxis tmc_axes[TMC_AXIS_COUNT];
+
+/* Single shared UART readiness — set by tmc2209_hw_init(). */
+extern bool tmc_uart_ready;
+
+/* ── UART access serialisation (tmc_uart.c) ────────────────── */
+
+esp_err_t tmc_uart_lock(void);
+void tmc_uart_unlock(void);
+
+/* ── UART register primitives (tmc_uart.c) ─────────────────── */
+
+esp_err_t tmc_write_register(const TmcAxis *axis, uint8_t reg, uint32_t value);
+esp_err_t tmc_read_register(const TmcAxis *axis, uint8_t reg, uint32_t *value);
+
+/* ── MRES conversion (tmc_driver.c) ────────────────────────── */
+
+bool tmc_microsteps_to_mres(uint16_t ms, uint8_t *mres);
+
+/* Read the SPREAD pin level (IOIN[8]) from a driver (tmc_driver.c).  Returns
+ * false when the read fails — the caller then assumes SPREAD=LOW. */
+bool tmc_read_spread_pin(const TmcAxis *axis, bool *spread_high);
+
+/* ── Driver configuration — shared by hw_init and reinit (tmc_driver.c) ── */
+
+void tmc_reset_diagnostics(void);
+esp_err_t tmc_configure_drivers(void);
+
+/* Active microstep resolution — written by tmc_configure_drivers() and
+ * tmc2209_set_microsteps(), read by tmc2209_get_microsteps() (tmc_driver.c). */
+extern uint16_t tmc_microsteps;
+
+/* Active chopper mode — written by tmc_configure_drivers() and
+ * tmc2209_set_chop_mode(), read by tmc2209_get_chop_mode() (tmc_driver.c). */
+extern TmcChopMode tmc_chop_mode;
+
+/* ── Init diagnostics (tmc_status.c) ───────────────────────── */
+
+extern TmcStatus tmc_status;
+extern TmcError  tmc_error;
+
+/* ── Init state (tmc_get_initialized.c) ────────────────────── */
+
+void tmc2209_set_initialized(bool initialized);

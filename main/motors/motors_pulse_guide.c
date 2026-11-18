@@ -10,17 +10,32 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-void motors_pulse_guide_start(int axis, float offset_dps, uint32_t duration_ms) {
+MotorResultCode motors_pulse_guide_start(int axis, float offset_dps, uint32_t duration_ms) {
+    if (motors_status_is_error(motors_state.status)) {
+        return MOTOR_ERR_HARDWARE_ERROR;
+    }
+
+    if (motors_status_is_parked(motors_state.status)) {
+        return MOTOR_ERR_PARKED;
+    }
+
     MotionCommand cmd = {
         .type = MOTION_CMD_PULSE_GUIDE,
         .guide_axis = axis,
         .guide_offset_dps = offset_dps,
         .guide_duration_ms = duration_ms,
     };
-    motors_queue_put(&cmd);
-
-    /* Wake the motion task so it processes the command immediately. */
-    if (motors_motion_task_handle) {
-        xTaskNotify(motors_motion_task_handle, 0, eNoAction);
+    if (!motors_queue_put(&cmd)) {
+        return MOTOR_ERR_BUSY;
     }
+
+    /* Wake the motion task so it processes the command immediately.
+     * eIncrement (xTaskNotifyGive): the tracking loop sleeps in
+     * ulTaskNotifyTake(pdTRUE, …), which only wakes early on a non-zero
+     * notification count.  eNoAction leaves the count at zero, so the new
+     * pulse would wait out the sleep timeout before the queue peek sees it. */
+    if (motors_motion_task_handle) {
+        xTaskNotifyGive(motors_motion_task_handle);
+    }
+    return MOTOR_OK;
 }

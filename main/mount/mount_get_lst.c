@@ -6,10 +6,11 @@
 #include "mount_internal.h"
 
 #include <math.h>
+#include <sys/time.h>
 #include <time.h>
 
-static double jd_from_unix(time_t t) {
-    return (double) t / 86400.0 + 2440587.5;
+static double jd_from_unix(double t) {
+    return t / 86400.0 + 2440587.5;
 }
 
 static double gmst_hours(double jd) {
@@ -22,14 +23,19 @@ static double gmst_hours(double jd) {
 }
 
 float mount_get_lst(void) {
-    time_t now = time(NULL);
+    /* Fractional-second clock — avoids the ~15"/s sawtooth in reported RA. */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double) tv.tv_sec + (double) tv.tv_usec / 1e6;
+
     double jd = jd_from_unix(now);
     double gmst_h = gmst_hours(jd);
     double lst_h = gmst_h + (mount_internal_state.lon / 15.0);
 
-    /* Normalize to [0, 24). */
-    while (lst_h < 0.0)  lst_h += 24.0;
-    while (lst_h >= 24.0) lst_h -= 24.0;
+    /* Normalize to [0, 24).  fmod keeps this O(1) and cannot spin forever on a
+     * non-finite longitude read from a corrupted settings store. */
+    lst_h = fmod(lst_h, 24.0);
+    if (lst_h < 0.0) lst_h += 24.0;
 
     return (float) lst_h;
 }

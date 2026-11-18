@@ -5,12 +5,14 @@
 #include "mount.h"
 #include "mount_internal.h"
 
+#include <math.h>
+
 MountResult mount_settings_update(MountSettings settings) {
-    if (settings.lat < -90.0f || settings.lat > 90.0f) {
+    if (!isfinite(settings.lat) || settings.lat < -90.0f || settings.lat > 90.0f) {
         return mount_result_error("Latitude is outside valid range -90 <= lat <= 90");
     }
 
-    if (settings.lon < -180.0f || settings.lon > 180.0f) {
+    if (!isfinite(settings.lon) || settings.lon < -180.0f || settings.lon > 180.0f) {
         return mount_result_error("Longitude is outside valid range -180 <= lon <= 180");
     }
 

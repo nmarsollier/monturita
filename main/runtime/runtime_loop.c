@@ -1,6 +1,6 @@
 /* Runtime - runtime_loop.c
  *
- * Purpose: run the periodic mount cycle for inputs polling.
+ * Purpose: run the periodic mount cycle for inputs.
  */
 #include "runtime.h"
 
@@ -8,6 +8,12 @@
 #include "freertos/task.h"
 
 #include "led.h"
+#include "motors.h"
+#include "tmc.h"
+
+#define MAIN_LOOP_PERIOD_MS     200
+#define MAIN_TASK_STACK_SIZE    4096
+#define MAIN_TASK_PRIORITY      5
 
 /*
  * Business use case: orchestrate the mount's periodic operational cycle.
@@ -15,39 +21,36 @@
  * Objective: keep input polling running at a stable cadence.
  * Motor motion runs in its own task owned by the motors_motion subsystem.
  */
-
-#define MAIN_LOOP_PERIOD_MS    20
-#define INPUTS_POLL_PERIOD_MS  50
-
 static void main_loop_task(void *arg) {
     (void) arg;
-    TickType_t main_period_ticks = pdMS_TO_TICKS(MAIN_LOOP_PERIOD_MS);
-    TickType_t inputs_period_ticks = pdMS_TO_TICKS(INPUTS_POLL_PERIOD_MS);
-
-    TickType_t elapsed_inputs_ticks = inputs_period_ticks;
+    const TickType_t period = pdMS_TO_TICKS(MAIN_LOOP_PERIOD_MS);
+    unsigned int tick = 0;
 
     while (true) {
-        if (elapsed_inputs_ticks >= inputs_period_ticks) {
-            led_update();
-            elapsed_inputs_ticks = 0;
+        /* Every ~1 s, probe both TMC2209s over UART as the "TMC working" sense
+         * and feed the result to the motors power gating.  During a high-speed
+         * slew the probe is skipped — its UART/GPIO activity would disturb the
+         * RMT step stream — but it runs during tracking (slow) and idle, so a
+         * power fault is still detected while the mount is tracking. */
+        if (++tick >= 5) {
+            tick = 0;
+            if (!motors_is_slewing()) {
+                motors_update_power(tmc2209_probe());
+            } else {
+                motors_update_power(true);
+            }
         }
 
-        elapsed_inputs_ticks += main_period_ticks;
-
-        vTaskDelay(main_period_ticks);
+        led_update();
+        vTaskDelay(period);
     }
 }
 
 /*
  * Business use case: start the main runtime in the background.
  *
- * Objective: delegate continuous operation to a dedicated FreeRTOS task
- * on CPU 0.
+ * Objective: delegate continuous operation to a dedicated FreeRTOS task.
  */
-
-#define MAIN_TASK_STACK_SIZE 4096
-#define MAIN_TASK_PRIORITY   5
-
 void setup_runtime_start(void) {
     xTaskCreatePinnedToCore(
         main_loop_task,
@@ -56,5 +59,5 @@ void setup_runtime_start(void) {
         NULL,
         MAIN_TASK_PRIORITY,
         NULL,
-        0);  /* CPU 0 */
+        0);  /* CPU 0 — keep CPU 1 isolated for the motion task */
 }

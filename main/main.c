@@ -1,22 +1,23 @@
 /* Main - main.c
  *
- * Purpose: start the runtime subsystems, HTTP server, and main loop.
+ * Purpose: start the runtime subsystems, then the serial protocol (CDC),
+ * and the main loop.
  */
 #include "esp_log.h"
-#include "rest.h"
-#include "rest_alpaca.h"
-
-#include "udp_alpaca.h"
 #include "runtime.h"
+
+#if CONFIG_TINYUSB_CDC_ENABLED
+#include "proto.h"
+#endif
 
 static const char *TAG = "MAIN";
 
 void app_main(void) {
     setup_init();
 
-    rest_server_start();
-    rest_alpaca_server_start();
-    udp_alpaca_start();
+#if CONFIG_TINYUSB_CDC_ENABLED
+    proto_init();
+#endif
 
     setup_runtime_start();
 

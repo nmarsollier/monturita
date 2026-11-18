@@ -8,6 +8,10 @@
 #include "motors.h"
 
 MountResult mount_home(void) {
-    motors_home();
-    return mount_result_ok();
+    if (mount_is_error()) {
+        return mount_result_error_state();
+    }
+
+    MotorResultCode rc = motors_home();
+    return motors_result_code_error_result(rc);
 }

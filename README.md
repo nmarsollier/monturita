@@ -1,107 +1,95 @@
 # monturita — No Precision Instruments Inc.
 
-Fully functional mini equatorial mount toy powered by an ESP32-S3, controllable via N.I.N.A. (Alpaca / ASCOM)
-and its own REST API.
+Montura ecuatorial DIY controlada por un ESP32-S3 a través de un protocolo serial
+**USB CDC-ACM**. Una app de escritorio (**mount_panel**, en Go, repo aparte) es el
+único cliente: traduce ese protocolo a Alpaca/ASCOM y a una UI para N.I.N.A. y PHD2.
 
-This firmware runs on a Hosyond ESP32-S3 N16R8 board, driving two NEMA 17 stepper motors through
-TMC2209 drivers. It exposes a full ASCOM Alpaca telescope interface on port 11111 so
-N.I.N.A. and other clients can discover and control the mount directly.
+Este firmware corre en una placa Hosyond ESP32-S3 N16R8, controlando dos motores
+NEMA 17 a través de drivers TMC2209.
 
-<img src="docs/montura-eq.jpeg" alt="monturita" width="400">
-
-## Architecture
-
-```
-N.I.N.A. / ASCOM client
-Alpaca REST API  (port 11111)  ◄── also: UDP discovery on 32227
-REST API  (port 80)  ── serves embedded SPA at /
-  Mount  (orchestration, coordinates, settings)
-  Motors  (move / track)
-  TMC2209 UART driver  (hardware config & microstep control)
-
-Network  (WiFi station + setup AP fallback)
-USB Net  (RNDIS/ECM gadget, 192.168.7.1, DHCP server)
-LED  (GPIO 4 PWM: dim / bright / breathing)
-Runtime  (init sequence + periodic loop)
-```
+<img src="docs/monturita.jpeg" alt="monturita" width="400">
 
 ## Hardware
 
-- **Board**: Hosyond ESP32-S3 N16R8 (ESP32-S3-WROOM-1, USB-C, 16 MB Flash, 8 MB PSRAM)
-- **Motor drivers**: 2× TMC2209 (UART, StealthChop, 128 µsteps)
-- **Motors**: 2× NEMA 17 (1.8° step, 1.4 A rated)
-- **Reduction**: 20-tooth motor pulley → 80-tooth axis pulley (4:1)
-- **Power**: Power supply input of 12v 5A and MINI DC 360 to convert 12v dc to 5v dc.
-- **1k resistor**: for UART communication.
-- **LED**: PWM indicator (GPIO 4) — three states: dim (~10%) at idle, bright (100%) during slewing, slow breathing on error (WiFi / UART). On-board LED unused.
+- **Placa**: Hosyond ESP32-S3 N16R8 (ESP32-S3-WROOM-1, USB-C, 16 MB flash, 8 MB PSRAM)
+- **Drivers**: 2× TMC2209 (UART, StealthChop, 128 µsteps) — referencia técnica en [`TMC.md`](TMC.md)
+- **Motores**: 2× NEMA 17 (1.8° por paso, 1.5 A nominales)
+- **Reducción**: polea 20 dientes en el motor → 80 dientes en el eje (4:1)
+- **Alimentación**: fuente 12 V 5 A + MINI DC 360 (12 V → 5 V)
+- **LED**: indicador PWM (GPIO 4) — tenue en reposo, brillante en slew, beacon en error
+- **Botones**: STOP (GPIO 16) y HOME (GPIO 21), inputs con pull-up interno
+- **UART TMC2209**: bus unifilar compartido (GPIO 17 TX con resistencia 1 kΩ en serie, GPIO 18 RX), direccionamiento por MS1/MS2
 
 ### Pin mapping
 
-<img src="docs/circuit.jpeg" alt="monturita" width="400">
+<img src="docs/circuit.jpeg" alt="circuito" width="400">
+<img src="docs/board.jpeg" alt="placa" width="400">
 
-<img src="docs/board.jpeg" alt="monturita" width="400">
+| GPIO | Función          | Notas                          |
+|------|------------------|--------------------------------|
+| 4    | LED (PWM)        | Indicador de estado externo    |
+| 7    | DEC DIR          | Dirección eje declinación      |
+| 9    | RA DIR           | Dirección eje ascensión recta  |
+| 10   | RA STEP          | Pulso STEP eje ascensión recta |
+| 14   | MOTORS ENABLE    | Enable global compartido       |
+| 15   | DEC STEP         | Pulso STEP eje declinación     |
+| 16   | STOP button      | Input con pull-up interno      |
+| 17   | TMC2209 UART TX  | Vía resistencia 1 kΩ en serie  |
+| 18   | TMC2209 UART RX  | Bus unifilar                   |
+| 21   | HOME button      | Input con pull-up interno      |
 
-| GPIO | Function           | Notes                        |
-|------|--------------------|------------------------------|
-| 4    | LED (PWM)          | External status indicator    |
-| 7    | DEC DIR            | Declination axis direction   |
-| 9    | RA DIR             | Right ascension axis dir     |
-| 10   | RA STEP            | Right ascension step pulse   |
-| 14   | MOTORS ENABLE      | Shared enable for both axes  |
-| 15   | DEC STEP           | Declination step pulse       |
-| 16   | STOP button        | Input, internal pull-up      |
-| 17   | TMC2209 UART TX    | Via 1k series resistor       |
-| 18   | TMC2209 UART RX    | Single-wire bus              |
+## Arquitectura
 
-## USB Ethernet (RNDIS/ECM)2
+```
+mount_panel (Go) — Alpaca + UI
+  └─ USB CDC-ACM serial protocol
+       └─ ESP32-S3: Proto → Mount → Motors → STEP/DIR (RMT)
+```
 
-The ESP32-S3 acts as a USB Ethernet gadget via its native USB-OTG peripheral. Connect the mount to a laptop with a USB-C cable and it appears as a network adapter — no WiFi needed in the field.
+- **usb_cdc** (`main/usb_cdc/`) — transporte CDC-ACM (TinyUSB): init, tarea RX, TX.
+- **proto** (`main/proto/`) — protocolo serial: framing, dispatch, un handler por familia de mensajes, sesión (`boot_id`, `config_rev`, idempotencia).
+- **mount** (`main/mount/`) — orquestación: estado, coordenadas, meridian flip, settings.
+- **motors** (`main/motors/`) — movimiento: GPIO STEP/DIR, generación de pulsos por RMT+DMA.
+- **tmc** (`main/tmc/`) — driver TMC2209 por UART (bus único, direccionamiento MS1/MS2).
+- **led** (`main/led/`) — PWM GPIO 4: tenue / brillante / beacon.
+- **config** (`main/config/config.h`) — única fuente de verdad de los parámetros de hardware.
+- **runtime** (`main/runtime/`) — secuencia de init + ciclo periódico.
 
-| Property        | Value                    |
-|-----------------|--------------------------|
-| Protocol        | ECM (Linux/macOS) / RNDIS (Windows) |
-| ESP32-S3 IP     | `192.168.7.1` (static)   |
-| Host IP         | `192.168.7.2` – `192.168.7.10` (DHCP) |
-| REST API        | `http://192.168.7.1/api/status` |
-| Alpaca API      | `http://192.168.7.1:11111` |
-| UDP Discovery   | `192.168.7.1:32227`      |
+## Protocolo CDC-ACM (serial)
 
-WiFi and USB Ethernet work simultaneously — all servers bind to `INADDR_ANY`.
+El ESP32-S3 habla un protocolo serial pequeño y determinista sobre USB CDC-ACM.
+El `mount_panel` es el único cliente. El ESP es la autoridad sobre la montura:
+publica un estado coherente y ejecuta un conjunto pequeño de operaciones.
 
-### OS-specific notes
+**Framing**: trama = `[u32 little-endian length][JSON UTF-8]` (sin CRC de aplicación:
+USB ya es fiable). Máximo ~2048 B por trama, buffers preasignados.
 
-- **Windows 10/11**: RNDIS driver is built-in. The device appears as "Mount USB Ethernet" in Network adapters.
-- **macOS**: CDC-ECM is natively supported. The interface appears as `usb0`.
-- **Linux**: CDC-ECM is handled by the `cdc_ether` kernel module (loaded automatically).
+La especificación completa del protocolo (formato, semántica por familia, decisiones
+de diseño) vive en [`main/proto/README.md`](main/proto/README.md).
 
 ## Setup
 
 ### Requirements
 
-| Tool    | Version      | Purpose                       |
-|---------|--------------|-------------------------------|
-| ESP-IDF | v6.0.1       | Firmware build system         |
-| Python  | 3.10+ (venv) | Required by ESP-IDF tools     |
-| CMake   | 4.x          | Build system                  |
-| Ninja   | 1.x          | Build executor                |
-| Node.js | 22+          | Web UI build (`www/build.js`) |
-| npm     | 9+           | UI dependencies (Alpine.js)   |
+| Tool     | Version      | Purpose               |
+|----------|--------------|-----------------------|
+| ESP-IDF  | v6.0.1       | Sistema de build      |
+| Python   | 3.10+ (venv) | Requerido por ESP-IDF |
+| CMake    | 4.x          | Sistema de build      |
+| Ninja    | 1.x          | Ejecutor de build     |
 
-### macOS install
+### Instalación en macOS
 
 ```sh
-# ESP-IDF v6.0.1
 mkdir -p ~/.espressif
 git clone --depth 1 --branch v6.0.1 https://github.com/espressif/esp-idf.git ~/.espressif/v6.0.1/esp-idf
 export IDF_TOOLS_PATH="$HOME/.espressif/tools"
 cd ~/.espressif/v6.0.1/esp-idf && bash install.sh esp32s3
 
-# build tools + Node.js
-brew install cmake ninja node
-cd www && npm install
+brew install cmake ninja
 ```
 
-Add to `~/.zshrc` (adjust paths to match your system):
+Agregar a `~/.zshrc` (ajustar rutas a tu sistema):
 
 ```sh
 export IDF_PATH="$HOME/.espressif/v6.0.1/esp-idf"
@@ -118,21 +106,10 @@ idf.py set-target esp32s3
 idf.py build flash monitor
 ```
 
-### Web UI
+## Convenciones del proyecto
 
-The SPA lives in `www/src/` (HTML, CSS, JS). Rebuild the embedded UI with:
-
-```sh
-node www/build.js
-idf.py build
-```
-
-The resulting `www/dist/index.html` is embedded into the firmware via `EMBED_TXTFILES`.
-
-## Project conventions
-
-- Language: **C** (C23), snake_case
-- One `.c` file per use case within each module
-- Public API: `module.h` — Internal API: `module_internal.h`
-- Function prefix matches module name (`motors_`, `mount_`, `alpaca_bridge_`, …)
-- Dependencies: REST → Mount → Motors → Motors Motion → TMC (no reverse deps)
+- Lenguaje: **C** (C23), snake_case
+- Un archivo `.c` por caso de uso dentro de cada módulo
+- API pública: `module.h` — API interna: `module_internal.h`
+- Prefijo de función igual al nombre del módulo (`motors_`, `mount_`, …)
+- Dependencias: proto → mount → motors → tmc (sin dependencias reversas)

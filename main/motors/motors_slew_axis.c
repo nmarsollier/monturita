@@ -13,26 +13,37 @@
 
 static const char *TAG = "MOTORS_SLEW_AXIS";
 
-static MotorResultCode motors_slew_axis_impl(float ra_delta_deg, float dec_delta_deg) {
+static MotorResultCode motors_slew_axis_impl(float ra_delta_deg, float dec_delta_deg,
+                                             float ra_speed, float dec_speed) {
+    if (motors_status_is_error(motors_state.status)) {
+        return MOTOR_ERR_HARDWARE_ERROR;
+    }
+
+    if (motors_status_is_parked(motors_state.status)) {
+        return MOTOR_ERR_PARKED;
+    }
+
     TrackingMode currTracking = TRACKING_NONE;
     if (motors_state.status == MOTORS_STATUS_TRACKING
         && motors_state.tracking != TRACKING_NONE) {
         currTracking = motors_state.tracking;
-        motors_stop();
+        MotorResultCode stop_rc = motors_stop();
+        if (stop_rc != MOTOR_OK) {
+            return stop_rc;
+        }
     }
 
     MotionCommand cmd = {
         .type = MOTION_CMD_SLEW,
-        .ra_speed = motors_state.ra_speed,
-        .dec_speed = motors_state.dec_speed,
+        .ra_speed = ra_speed,
+        .dec_speed = dec_speed,
         .relative = true,
         .ra_delta_deg = ra_delta_deg,
         .dec_delta_deg = dec_delta_deg,
+        .resume_tracking = currTracking,
     };
-    motors_queue_put(&cmd);
-
-    if (currTracking != TRACKING_NONE) {
-        motors_start_tracking(currTracking);
+    if (!motors_queue_put(&cmd)) {
+        return MOTOR_ERR_BUSY;
     }
     return MOTOR_OK;
 }
@@ -50,8 +61,8 @@ MotorResultCode motors_slew_axis_ra(float degrees, int speed_rate) {
                  motors_get_ra_deg() + degrees);
         return MOTOR_ERR_OUT_OF_RANGE;
     }
-    motors_state.ra_speed = motors_get_slewing_speed(speed_rate);
-    return motors_slew_axis_impl(degrees, 0.0f);
+    return motors_slew_axis_impl(degrees, 0.0f,
+                                 motors_get_slewing_speed(speed_rate), 0.0f);
 }
 
 /*
@@ -67,6 +78,6 @@ MotorResultCode motors_slew_axis_dec(float degrees, int speed_rate) {
                  motors_get_dec_deg() + degrees);
         return MOTOR_ERR_OUT_OF_RANGE;
     }
-    motors_state.dec_speed = motors_get_slewing_speed(speed_rate);
-    return motors_slew_axis_impl(0.0f, degrees);
+    return motors_slew_axis_impl(0.0f, degrees, 0.0f,
+                                 motors_get_slewing_speed(speed_rate));
 }

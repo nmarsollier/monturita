@@ -9,7 +9,15 @@
 #include "motors.h"
 #include "motors_internal.h"
 
-void motors_home(void) {
+MotorResultCode motors_home(void) {
+    if (motors_status_is_error(motors_state.status)) {
+        return MOTOR_ERR_HARDWARE_ERROR;
+    }
+
+    if (motors_status_is_parked(motors_state.status)) {
+        return MOTOR_ERR_PARKED;
+    }
+
     motors_stop();
-    motors_slew_to_angle(0.0f, 0.0f, 0);
+    return motors_slew_to_angle(0.0f, 0.0f, 0);
 }

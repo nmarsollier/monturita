@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include "motors/motors.h"
 
 /* MotorAxis is defined in rest/rest.h */
@@ -19,7 +20,7 @@ typedef struct {
 } MountResult;
 
 /*
- * Astronomical guide directions — Alpaca PulseGuide input.
+ * Astronomical guide directions — serial protocol `guide` input.
  * Mapped to physical axis signs inside the mount layer.
  */
 typedef enum {
@@ -40,6 +41,24 @@ typedef struct {
     float dec_axis_deg;
     int pier_side;      /* 0 = pierEast, 1 = pierWest — set by equatorial_to_axis */
 } AxisCoordinates;
+
+/* Destination pier side requested for a goto.
+ *
+ * PIER_SIDE_AUTO applies the asymmetric meridian policy: from WEST it flips to
+ * EAST as soon as the target crosses the meridian (HA >= 0), and from EAST it
+ * keeps EAST until EAST is mechanically unreachable (then falls back to WEST).
+ * A fallback also applies from WEST with HA < 0 when WEST is unreachable, but
+ * never on the flip itself (WEST + HA >= 0 -> EAST is mandatory or the goto
+ * rejects).
+ *
+ * PIER_SIDE_EAST / PIER_SIDE_WEST force that side and reject the goto when it
+ * is unreachable — this is how a client requests an explicit meridian flip and
+ * distinguishes it from an ordinary goto. */
+typedef enum {
+    PIER_SIDE_AUTO = -1,
+    PIER_SIDE_EAST = 0,
+    PIER_SIDE_WEST = 1,
+} PierSideRequirement;
 
 /* Formatted astronomical coordinate types. */
 typedef struct {
@@ -67,6 +86,7 @@ typedef struct {
 
 /* Conversion functions between equatorial and physical axis coordinates. */
 bool equatorial_to_axis(EquatorialCoordinates eq, AxisCoordinates current,
+                        time_t at_time, PierSideRequirement required,
                         AxisCoordinates *out);
 
 EquatorialCoordinates axis_to_equatorial(AxisCoordinates axis);
@@ -90,9 +110,9 @@ void mount_init(void);
 /*
  * mount_get_visible_status_data
  * -----------------------------
- * Return the current status view that the REST/API layer and UI consume.
- * The structure contains motors-derived status, current tracking mode, last
- * known RA/DEC (in axis-space), timestamp and persisted settings.
+ * Return the current status view that the serial protocol and its clients consume.
+ * The structure contains motors-derived status, current tracking mode,
+ * RA/DEC coordinates, LST, pier side, and persisted settings.
  */
 VisibleStatusData mount_get_visible_status(void);
 
@@ -113,9 +133,24 @@ MountResult mount_set_tracking(TrackingMode tracking);
  *  - `ra` (hours): right ascension in hours.
  *  - `dec` (degrees): declination in degrees.
  *  - `speed_rate` (1..4): requested speed profile (higher = faster).
+ *  - `required` (PierSideRequirement): AUTO applies the asymmetric meridian
+ *    policy (see PierSideRequirement); EAST/WEST force that side and reject if
+ *    unreachable.
  * Returns a MountResult describing acceptance or rejection.
  */
-MountResult mount_slew_to_coordinates(float ra, float dec, int speed_rate);
+MountResult mount_slew_to_coordinates(float ra, float dec, int speed_rate,
+                                     PierSideRequirement required);
+
+/*
+ * mount_destination_side_of_pier
+ * -------------------------------
+ * Predict, without moving, which pier side (0 = east, 1 = west) a goto to the
+ * given equatorial position would select at this instant.  Uses the same
+ * selection as mount_slew_to_coordinates, so the prediction matches what a real
+ * goto would do.  Returns a MountResult; on success *side is set, on failure
+ * (time not synced, target unreachable) the result carries the reason.
+ */
+MountResult mount_destination_side_of_pier(float ra, float dec, int *side);
 
 /*
  * mount_stop
@@ -153,16 +188,16 @@ MountResult mount_settings_update(MountSettings settings);
 
 MountResult mount_set_system_time(const char *iso_time);
 
+/* Validate an ISO-8601 UTC timestamp string without applying it. */
+bool mount_time_string_is_valid(const char *iso_time);
+
+/* True once a valid system time has been set — gates GOTO. */
+bool mount_time_is_valid(void);
+
 /*
  * Move the mount to its home position.
  */
 MountResult mount_home(void);
-
-/*
- * Set the current physical position as the new zero reference.
- * Both axis step counters reset to 0. The mount must be READY.
- */
-MountResult mount_set_zero(void);
 
 /*
  * mount_move_axis
@@ -182,10 +217,14 @@ MountResult mount_move_axis_dec(float degrees, int speed_rate);
  * ------------------------
  * Move one or both axes continuously at the given rates in deg/s until
  * a subsequent call with both rates = 0 (or STOP / PARK) halts motion.
- * Positive = forward, negative = reverse.  Used by Alpaca MoveAxis and
- * manual centering controls.
+ * Positive = forward, negative = reverse.  Used by MoveAxis and manual
+ * centering controls.
  */
 MountResult mount_set_move_axis_speed(float ra_speed, float dec_speed);
+
+/* Move a single axis (0 = RA, 1 = DEC) at `rate` deg/s, preserving the
+ * other axis's current rate. */
+MountResult mount_set_move_axis_rate(int axis, float rate);
 
 /* Discard saved tracking state when MoveAxis is aborted externally. */
 void mount_move_axis_reset(void);
@@ -203,20 +242,45 @@ float mount_get_lst(void);
  * mount_pulse_guide
  * -----------------
  * Execute a guide pulse on the specified astronomical direction for the
- * given duration in milliseconds.  Rejected if the mount status is not
- * READY or TRACKING.  Coexists with tracking.
+ * given duration in milliseconds.  Rejected if the mount is not READY
+ * or TRACKING.  Coexists with tracking.
  *
  * Guide rate is read from the per-axis guide rate stored in this module.
  */
 MountResult mount_pulse_guide(GuideDirection direction, uint32_t duration_ms);
 
 /*
+ * Guide rate contract (degrees/second).
+ *
+ * Rates are positive angles in deg/s; the default is 0.5 × sidereal
+ * (~0.002089 deg/s).  The accepted range is 0 .. MOUNT_MAX_GUIDE_RATE_DPS
+ * (1 deg/s, matching the gateway's 0..1 deg/s contract).  Zero is a valid,
+ * explicit per-axis "guiding disabled" value: PulseGuide to a disabled axis
+ * is rejected before enqueueing, while the other axis keeps working.
+ */
+#define MOUNT_MAX_GUIDE_RATE_DPS 1.0f
+
+/* True if `rate_dps` is a valid guide rate (finite, 0 .. 1 deg/s). */
+bool mount_guide_rate_is_valid(float rate_dps);
+
+/*
  * mount_set_guide_rate / mount_get_guide_rate
  * -------------------------------------------
- * Store or retrieve the guide rate for the given axis in degrees/second,
- * per axis for Alpaca compliance.
+ * Store or retrieve the guide rate per axis in degrees/second.
+ * Kept separate to expose independent RA and DEC guide-rate properties.
+ *
+ * The setters return false and leave the stored rate unchanged when
+ * `rate_dps` is not a valid guide rate (negative, above 1 deg/s, or
+ * non-finite).  They never coerce an invalid value into a default.
  */
-void mount_set_guide_rate_ra(float rate_dps);
-void mount_set_guide_rate_dec(float rate_dps);
+bool mount_set_guide_rate_ra(float rate_dps);
+bool mount_set_guide_rate_dec(float rate_dps);
 float mount_get_guide_rate_ra(void);
 float mount_get_guide_rate_dec(void);
+
+/*
+ * Set an axis limit or home position from the current physical position.
+ * action: "set_home" | "set_ra_left" | "set_ra_right" |
+ *         "set_dec_left" | "set_dec_right"
+ */
+MountResult mount_limits_set(const char *action);

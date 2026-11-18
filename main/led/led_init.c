@@ -1,16 +1,17 @@
 /* LED — led_init.c
  *
- * Purpose: initialise LEDC PWM on GPIO 4 for brightness control.
+ * Purpose: initialise LEDC PWM on LED_GPIO for brightness control.
  *
  * Configures timer 0 at 5 kHz, 13-bit resolution (8192 steps),
- * binds channel 0 to GPIO 4, and starts with the dim (NORMAL) duty.
+ * binds channel 0 to LED_GPIO, and starts with the dim (NORMAL) duty.
+ *
+ * The LED is driven directly from the GPIO (the inverting Darlington
+ * driver was removed): the pin sources current, so higher duty = brighter
+ * and no output inversion is required.
  */
 #include "led_internal.h"
 
 #include "esp_err.h"
-#include "esp_log.h"
-
-static const char *TAG = "LED_INIT";
 
 void led_init(void) {
     /* ── Timer ─────────────────────────────────────────── */
@@ -40,7 +41,4 @@ void led_init(void) {
 
     /* ── Fade service (needed for ledc_set_fade_time_and_start) ── */
     ESP_ERROR_CHECK(ledc_fade_func_install(0));
-
-    ESP_LOGI(TAG, "LEDC PWM ready on GPIO %d, dim=%u, bright=%u",
-             LED_GPIO, LED_DIM_DUTY, LED_BRIGHT_DUTY);
 }

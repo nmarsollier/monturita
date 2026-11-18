@@ -9,9 +9,16 @@
 #include "motors_internal.h"
 
 MotorResultCode motors_start_tracking(TrackingMode mode) {
+    if (motors_status_is_error(motors_state.status)) {
+        return MOTOR_ERR_HARDWARE_ERROR;
+    }
+
     if (mode == TRACKING_NONE) {
-        motors_stop();
-        return MOTOR_OK;
+        return motors_stop();
+    }
+
+    if (motors_status_is_parked(motors_state.status)) {
+        return MOTOR_ERR_PARKED;
     }
 
     float ra_speed = motors_get_tracking_speed(mode);
@@ -24,7 +31,9 @@ MotorResultCode motors_start_tracking(TrackingMode mode) {
         .dec_speed = 0.0f,
         .tracking_mode = mode,
     };
-    motors_queue_put(&cmd);
+    if (!motors_queue_put(&cmd)) {
+        return MOTOR_ERR_BUSY;
+    }
 
     return MOTOR_OK;
 }

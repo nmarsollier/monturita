@@ -28,15 +28,31 @@
  *
  * A German equatorial can point at the same sky position from two
  * mechanically-distinct configurations (one on each side of the pier).
- * Both are always computed and the one with the lowest movement cost
- * from the current axis position is selected.
+ * Both are computed, and the side is selected by a destination-side policy:
  *
  *   pierEast (0):  ra = HA - HOME_RA_OFFSET,   dec =  DEC + 90
  *   pierWest (1):  ra = HA + HOME_RA_OFFSET,   dec = -(DEC + 90)
  *
- * Computing both avoids the discontinuity at HA = 0 that would occur
- * if pier side were chosen by HA sign alone — a 0.2 astronomical
- * change causing a ~180 mechanical jump.
+ *   target west of the meridian (HA >= 0)  ->  pierEast
+ *   target east of the meridian (HA <  0)  ->  pierWest
+ *
+ * AUTO applies an asymmetric policy keyed on the current side (the sign of the
+ * linear DEC axis):
+ *
+ *   From WEST -> flip to EAST as soon as the target crosses the meridian
+ *                (HA >= 0); if EAST is unreachable, reject — never silently
+ *                stay WEST.
+ *   From EAST -> keep EAST while it is mechanically reachable, regardless of
+ *                hour angle; return to WEST only when EAST is out of limits
+ *                and WEST is reachable.  This keeps post-flip Slew-and-Center
+ *                gotos from snapping back across the meridian.
+ *
+ * An explicit EAST/WEST request forces that side and rejects the goto when it
+ * is unreachable — so a client can demand a meridian flip and tell it apart
+ * from an ordinary goto.
+ *
+ * The mechanical jump at HA = 0 is the flip itself — inherent to a German
+ * equatorial, not a discontinuity to be avoided.
  *
  * DEC axis is a linear coordinate (NOT circular).  It is NOT
  * normalised with normalize_degf() — that would incorrectly wrap
@@ -68,9 +84,9 @@
  * HOME_RA_OFFSET_DEG (90.0)
  *   RA axis angle at which the DEC plane aligns with the meridian.
  *
- * Axis limits are defined in motors_init.c (single source of truth).
- *
- * POLE_THRESHOLD_DEG (1.0)
+ * Axis limits (±100° RA, ±150° DEC) are defined in motors_init.c
+ * via motors_state.limits and validated at runtime through
+ * motors_current_state().limits.
  *   When |dec_axis| < 1 the scope is at the pole; RA is singular.
  *
  * =========================================================================
@@ -95,6 +111,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <sys/time.h>
 #include <time.h>
 #include <string.h>
 #include <esp_log.h>
@@ -103,8 +120,8 @@
  * Internal helpers
  * -------------------------------------------------------------------------- */
 
-static double unix_time_to_julian_date(time_t t) {
-    return (double) t / 86400.0 + 2440587.5;
+static double unix_time_to_julian_date(double t) {
+    return t / 86400.0 + 2440587.5;
 }
 
 static double gmst_hours_from_jd(double jd) {
@@ -124,15 +141,15 @@ static float normalize_degf(float d) {
     return d;
 }
 
-/* Normalise hours to [0, 24). */
+/* Normalise hours to [0, 24).  fmodf keeps this O(1) and, unlike a `while`
+ * loop, cannot spin forever on a non-finite input. */
 static float normalize_hoursf(float h) {
-    while (h < 0.0f)   h += 24.0f;
-    while (h >= 24.0f) h -= 24.0f;
+    h = fmodf(h, 24.0f);
+    if (h < 0.0f) h += 24.0f;
     return h;
 }
 
 #define HOME_RA_OFFSET_DEG  90.0f
-#define POLE_THRESHOLD_DEG   1.0f
 
 /* Validate against motor hardware limits (single source of truth).
  * motors_current_state().limits defines the authoritative boundaries. */
@@ -145,27 +162,41 @@ static bool axis_within_limits(float ra, float dec) {
 /* --------------------------------------------------------------------------
  * Equatorial -> Axis  (forward conversion)
  *
- * Two mechanically-distinct candidates; pick the valid one with the
- * lowest movement cost from the current axis position.
+ * Two mechanically-distinct candidates.  `required` selects the pier side:
+ * AUTO applies the asymmetric meridian policy (see the module header);
+ * EAST/WEST force that side and reject when it is unreachable.
  * -------------------------------------------------------------------------- */
 bool equatorial_to_axis(EquatorialCoordinates eq, AxisCoordinates current,
+                        time_t at_time, PierSideRequirement required,
                         AxisCoordinates *out) {
+
+    if (!isfinite(eq.ra_hours) || !isfinite(eq.dec_deg)) {
+        ESP_LOGE("COORD_CONV", "Non-finite RA/DEC — rejecting");
+        return false;
+    }
 
     if (eq.dec_deg < -90.0f || eq.dec_deg > 90.0f) {
         ESP_LOGE("COORD_CONV", "Invalid DEC %.4f — rejecting", eq.dec_deg);
         return false;
     }
 
-    while (eq.ra_hours < 0.0f)   eq.ra_hours += 24.0f;
-    while (eq.ra_hours >= 24.0f) eq.ra_hours -= 24.0f;
+    /* `required` is an internal, reusable function's parameter: a caller that
+     * passes anything outside the AUTO/EAST/WEST range would index c[] out of
+     * bounds below. */
+    if (required < PIER_SIDE_AUTO || required > PIER_SIDE_WEST) {
+        ESP_LOGE("COORD_CONV", "Invalid pier-side requirement %d — rejecting",
+                 (int) required);
+        return false;
+    }
 
-    time_t now = time(NULL);
-    double lst  = gmst_hours_from_jd(unix_time_to_julian_date(now))
+    eq.ra_hours = normalize_hoursf(eq.ra_hours);
+
+    double lst  = gmst_hours_from_jd(unix_time_to_julian_date(at_time))
                   + (mount_internal_state.lon / 15.0);
 
-    float ha_h = (float)(lst - eq.ra_hours);
-    while (ha_h > 12.0f)   ha_h -= 24.0f;
-    while (ha_h < -12.0f)  ha_h += 24.0f;
+    float ha_h = fmodf((float)(lst - eq.ra_hours), 24.0f);
+    if (ha_h > 12.0f)  ha_h -= 24.0f;
+    if (ha_h < -12.0f) ha_h += 24.0f;
 
     float ha_deg = ha_h * 15.0f;
     float dec_base = eq.dec_deg + 90.0f;
@@ -185,18 +216,39 @@ bool equatorial_to_axis(EquatorialCoordinates eq, AxisCoordinates current,
     c[1].dec  = -dec_base;
     c[1].pier = 1;
 
-    int best = -1;
-    float best_cost = 0.0f;
-    for (int i = 0; i < 2; i++) {
-        if (!axis_within_limits(c[i].ra, c[i].dec))
-            continue;
-        /* RA axis is limited (not circular) — use linear delta. */
-        float cost = fabsf(c[i].ra - current.ra_axis_deg)
-                   + fabsf(c[i].dec - current.dec_axis_deg);
-        if (best < 0 || cost < best_cost) {
-            best = i;
-            best_cost = cost;
+    /* Asymmetric AUTO policy, keyed on the current side (sign of the linear DEC
+     * axis — the same convention as axis_to_equatorial() and STATE's pier_side):
+     *   WEST -> flip EAST as soon as HA >= 0, no fallback (a flip must reject
+     *           rather than silently stay WEST).
+     *   EAST -> keep EAST while reachable; fall back to WEST only when EAST is
+     *           out of limits and WEST is reachable. */
+    int current_side = (current.dec_axis_deg >= 0.0f) ? PIER_SIDE_EAST
+                                                      : PIER_SIDE_WEST;
+
+    int desired;
+    bool allow_fallback;
+    if (required == PIER_SIDE_AUTO) {
+        if (current_side == PIER_SIDE_EAST) {
+            desired = PIER_SIDE_EAST;    /* stick to EAST */
+            allow_fallback = true;       /* -> WEST only when EAST is out of limits */
+        } else if (ha_deg >= 0.0f) {
+            desired = PIER_SIDE_EAST;    /* the flip: must not degrade to staying WEST */
+            allow_fallback = false;
+        } else {
+            desired = PIER_SIDE_WEST;    /* stay WEST; EAST allowed if WEST unreachable */
+            allow_fallback = true;
         }
+    } else {
+        desired = required;              /* PIER_SIDE_EAST or PIER_SIDE_WEST */
+        allow_fallback = false;
+    }
+
+    int best = -1;
+    if (axis_within_limits(c[desired].ra, c[desired].dec)) {
+        best = desired;
+    } else if (allow_fallback
+               && axis_within_limits(c[1 - desired].ra, c[1 - desired].dec)) {
+        best = 1 - desired;
     }
 
     if (best < 0) {
@@ -224,16 +276,9 @@ bool equatorial_to_axis(EquatorialCoordinates eq, AxisCoordinates current,
 EquatorialCoordinates axis_to_equatorial(AxisCoordinates axis) {
     EquatorialCoordinates out;
 
-    /* Near the pole: RA is singular, report RA=LST, DEC=-90. */
-    if (fabsf(axis.dec_axis_deg) < POLE_THRESHOLD_DEG) {
-        time_t now = time(NULL);
-        double lst = gmst_hours_from_jd(unix_time_to_julian_date(now))
-                     + (mount_internal_state.lon / 15.0);
-        out.ra_hours = normalize_hoursf((float)lst);
-        out.dec_deg  = -90.0f;
-        return out;
-    }
-
+    /* DEC is computed directly for every position.  At dec_axis == 0 (the
+     * exact pole) DEC is -90 and RA is degenerate: the formula still returns
+     * a valid, if arbitrary, RA — no threshold erases the nearby cone. */
     float ha_deg, dec_deg;
     if (axis.dec_axis_deg >= 0.0f) {
         /* pierEast: stored = -(offset - HA) = HA - offset  ->  HA = ra + offset */
@@ -247,7 +292,11 @@ EquatorialCoordinates axis_to_equatorial(AxisCoordinates axis) {
 
     float ha_h = ha_deg / 15.0f;
 
-    time_t now = time(NULL);
+    /* Fractional-second clock — avoids the ~15"/s sawtooth in reported RA. */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double) tv.tv_sec + (double) tv.tv_usec / 1e6;
+
     double lst = gmst_hours_from_jd(unix_time_to_julian_date(now))
                  + (mount_internal_state.lon / 15.0);
 

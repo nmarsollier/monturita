@@ -35,7 +35,7 @@ MountResult mount_result_error(const char *message) {
 /*
  * Business use case: normalize mount command responses.
  *
- * Objective: provide a uniform success/error contract for REST and UI
+ * Objective: provide a uniform success/error contract for the protocol and UI
  * clients.
  */
 MountResult mount_result_ok() {
@@ -52,7 +52,12 @@ MountResult motors_result_code_error_result(MotorResultCode rc) {
             return mount_result_error("Target out of range");
         case MOTOR_ERR_NOT_READY:
             return mount_result_error("Motors not ready");
-        case MOTOR_ERR_INTERNAL:
+        case MOTOR_ERR_HARDWARE_ERROR:
+            return mount_result_error_state();
+        case MOTOR_ERR_PARKED:
+            return mount_result_error("Mount is parked");
+        case MOTOR_ERR_BUSY:
+            return mount_result_error("Command queue full — try again");
         default:
             return mount_result_error("Motor error");
     }
